@@ -49,24 +49,35 @@ function CompleteForm({
   // Starts at the estimate; the real time you log is what the points are worked out from.
   const [minutes, setMinutes] = useState(snapMinutes(instance.estimated_duration));
   const [split, setSplit] = useState(false);
-  const [myPct, setMyPct] = useState(50);
+  const [ownerPct, setOwnerPct] = useState(50);
   const [busy, setBusy] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
 
-  const pct = split ? myPct : 100;
+  // Points go to whoever the chore is assigned to, not to whoever taps Complete.
+  // An unassigned chore is claimed by you. The split slider always runs owner -> other.
+  const ownerIsMe = !instance.assigned_to || instance.assigned_to === me.id;
+  const owner = ownerIsMe ? me : (partner ?? me);
+  const other = ownerIsMe ? partner : me;
+  const ownerTone = tone(owner.id);
+  const otherTone = other ? tone(other.id) : ownerTone === "a" ? "b" : "a";
+
+  const pct = split ? ownerPct : 100;
   const base = calculateBasePoints(minutes);
   const total = calculatePoints(minutes, instance.chore_tax);
-  const result = calculateSplit(minutes, total, pct); // a = you, b = your partner
-  const myTone = tone(me.id);
-  const partnerTone = partner ? tone(partner.id) : myTone === "a" ? "b" : "a";
+  const result = calculateSplit(minutes, total, pct); // a = owner, b = the other person
+  const myPoints = ownerIsMe ? result.a.points : result.b.points;
 
   async function complete() {
     setBusy(true);
     onClose(); // optimistic: the card flips to done immediately
     const ok = await actions.completeChore(instance, minutes, pct);
     if (!ok) return;
-    if (result.a.points > 0) toast(`Nice work! +${result.a.points} pt${result.a.points === 1 ? "" : "s"}`, "points");
-    else if (partner) toast(`Logged. ${partner.display_name} earns ${result.b.points} pts`, "success");
+    if (myPoints > 0) toast(`Nice work! +${myPoints} pt${myPoints === 1 ? "" : "s"}`, "points");
+    else if (other) {
+      // The caller earned nothing (a 0% share, or someone else's chore): say who did.
+      const earner = ownerIsMe ? { name: other.display_name, pts: result.b.points } : { name: owner.display_name, pts: result.a.points };
+      toast(`Logged. ${earner.name} earns ${earner.pts} pts`, "success");
+    }
     else toast("Logged", "success");
   }
 
@@ -114,30 +125,30 @@ function CompleteForm({
           <div className="mt-3 flex flex-col gap-1">
             <div className="flex items-center gap-2">
               <div className="flex w-12 shrink-0 flex-col items-center gap-0.5">
-                <Avatar name={me.display_name} tone={myTone} size={40} />
-                <span className="max-w-full truncate text-[11px] font-bold text-muted">{me.display_name}</span>
+                <Avatar name={owner.display_name} tone={ownerTone} size={40} />
+                <span className="max-w-full truncate text-[11px] font-bold text-muted">{owner.display_name}</span>
               </div>
               <input
                 type="range"
                 min={0}
                 max={100}
                 step={10}
-                value={myPct}
-                onChange={(e) => setMyPct(Number(e.target.value))}
-                aria-label={`${me.display_name}'s share of the effort`}
-                aria-valuetext={`${me.display_name} ${myPct} percent, ${partner.display_name} ${100 - myPct} percent`}
+                value={ownerPct}
+                onChange={(e) => setOwnerPct(Number(e.target.value))}
+                aria-label={`${owner.display_name}'s share of the effort`}
+                aria-valuetext={`${owner.display_name} ${ownerPct} percent, ${other?.display_name} ${100 - ownerPct} percent`}
                 className="split-range flex-1"
                 style={
                   {
-                    "--fill": `${myPct}%`,
-                    "--left": `var(--${myTone})`,
-                    "--right": `var(--${partnerTone})`,
+                    "--fill": `${ownerPct}%`,
+                    "--left": `var(--${ownerTone})`,
+                    "--right": `var(--${otherTone})`,
                   } as React.CSSProperties
                 }
               />
               <div className="flex w-12 shrink-0 flex-col items-center gap-0.5">
-                <Avatar name={partner.display_name} tone={partnerTone} size={40} />
-                <span className="max-w-full truncate text-[11px] font-bold text-muted">{partner.display_name}</span>
+                <Avatar name={other?.display_name ?? ""} tone={otherTone} size={40} />
+                <span className="max-w-full truncate text-[11px] font-bold text-muted">{other?.display_name}</span>
               </div>
             </div>
           </div>
@@ -159,19 +170,24 @@ function CompleteForm({
             {total} Points
           </span>
         </div>
+        {!ownerIsMe && !split && (
+          <p className="mt-3 border-t border-line pt-3 text-sm font-bold text-muted">
+            This is {owner.display_name}&rsquo;s chore, so all {result.a.points} points go to {owner.display_name}.
+          </p>
+        )}
         {split && partner && (
           <ul className="mt-3 flex flex-col gap-1.5 border-t border-line pt-3 text-sm font-bold" aria-live="polite">
             <li className="flex items-center justify-between gap-3">
               <span className="flex items-center gap-2">
-                <Avatar name={me.display_name} tone={myTone} size={20} />
-                {me.display_name} ({result.a.pct}%): {result.a.minutes} mins
+                <Avatar name={owner.display_name} tone={ownerTone} size={20} />
+                {owner.display_name} ({result.a.pct}%): {result.a.minutes} mins
               </span>
               <span className="tabular-nums">&rarr; {result.a.points} pts</span>
             </li>
             <li className="flex items-center justify-between gap-3">
               <span className="flex items-center gap-2">
-                <Avatar name={partner.display_name} tone={partnerTone} size={20} />
-                {partner.display_name} ({result.b.pct}%): {result.b.minutes} mins
+                <Avatar name={other?.display_name ?? ""} tone={otherTone} size={20} />
+                {other?.display_name} ({result.b.pct}%): {result.b.minutes} mins
               </span>
               <span className="tabular-nums">&rarr; {result.b.points} pts</span>
             </li>
@@ -183,7 +199,9 @@ function CompleteForm({
         <button onClick={complete} disabled={busy} className={`${primaryButton} min-h-14 w-full text-lg`}>
           <Icon name="check" strokeWidth={3} />
           Complete
-          <span className="opacity-80">· +{result.a.points} pts</span>
+          <span className="opacity-80">
+            {ownerIsMe ? `· +${myPoints} pts` : `· ${owner.display_name} +${result.a.points} pts`}
+          </span>
         </button>
         <div className="grid grid-cols-2 gap-2">
           <button

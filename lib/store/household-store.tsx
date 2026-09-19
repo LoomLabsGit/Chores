@@ -186,7 +186,8 @@ export type Actions = {
   editChore: (instance: ChoreInstance, edit: ChoreEdit) => Promise<boolean>;
   /** Undo a completion: takes the points back and returns the chore to unfinished. */
   uncompleteChore: (instance: ChoreInstance) => Promise<boolean>;
-  completeChore: (instance: ChoreInstance, minutes: number, myPercent: number) => Promise<boolean>;
+  /** `ownerPercent` is the share of the chore's owner (its assignee, or you if it is unassigned). */
+  completeChore: (instance: ChoreInstance, minutes: number, ownerPercent: number) => Promise<boolean>;
   createChallenge: (input: { title: string; assignedTo: string; target: number; reward: number }) => Promise<boolean>;
   respondToChallenge: (id: string, accept: boolean) => Promise<boolean>;
   /** Resolves to "completed" when this tap finished the challenge. */
@@ -678,38 +679,40 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
         return true;
       },
 
-      async completeChore(instance, minutes, myPercent) {
+      async completeChore(instance, minutes, ownerPercent) {
         const s = stateRef.current;
-        const other = s.members.find((m) => m.id !== userId);
+        // The credit goes to whoever the chore is assigned to, no matter who taps Complete.
+        // An unassigned chore is claimed by the person completing it.
+        const ownerId = instance.assigned_to ?? userId;
+        const otherId = s.members.find((m) => m.id !== ownerId)?.id;
         const totalPoints = calculatePoints(minutes, instance.chore_tax);
-        const split = calculateSplit(minutes, totalPoints, myPercent);
+        const split = calculateSplit(minutes, totalPoints, ownerPercent);
         const now = new Date().toISOString();
 
         const optimisticCompletion: ChoreCompletion = {
           id: `pending-${instance.id}`,
           instance_id: instance.id,
           total_duration_minutes: minutes,
-          user_a_id: userId,
+          user_a_id: ownerId,
           user_a_duration: split.a.minutes,
           user_a_points: split.a.points,
-          user_b_id: other?.id ?? userId,
+          user_b_id: otherId ?? ownerId,
           user_b_duration: split.b.minutes,
           user_b_points: split.b.points,
           created_at: now,
         };
-        // Completing an unassigned chore claims it for whoever completes it.
         dispatch({
           type: "instance",
-          row: { ...instance, is_completed: true, completed_at: now, assigned_to: instance.assigned_to ?? userId },
+          row: { ...instance, is_completed: true, completed_at: now, assigned_to: ownerId },
         });
         dispatch({ type: "completion", row: optimisticCompletion });
-        dispatch({ type: "points", userId, delta: split.a.points });
-        if (other) dispatch({ type: "points", userId: other.id, delta: split.b.points });
+        dispatch({ type: "points", userId: ownerId, delta: split.a.points });
+        if (otherId) dispatch({ type: "points", userId: otherId, delta: split.b.points });
 
         const { data, error } = await supabase.rpc("complete_chore", {
           p_instance_id: instance.id,
           p_total_minutes: minutes,
-          p_my_percent: myPercent,
+          p_my_percent: ownerPercent,
         });
         if (error) {
           dispatch({ type: "instance", row: instance });

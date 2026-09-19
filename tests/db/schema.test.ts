@@ -60,6 +60,7 @@ beforeAll(async () => {
   await db.exec(read("supabase/migrations/0004_uncheck_chore.sql"));
   await db.exec(read("supabase/migrations/0005_edit_completed_chore.sql"));
   await db.exec(read("supabase/migrations/0006_time_based_points.sql"));
+  await db.exec(read("supabase/migrations/0007_credit_the_assignee.sql"));
   for (const id of [ALEX, BLAKE, CASEY, DREW]) {
     await admin(`insert into auth.users (id, email) values ($1, $2)`, [id, `${id}@example.com`]);
   }
@@ -801,5 +802,57 @@ describe("unassigned chore pool", () => {
   it("you can hand a claimed chore back to the pool", async () => {
     const id = await chore(ALEX, "Unclaim", 0, ALEX);
     expect(await as(ALEX, `update public.chore_instances set assigned_to = null where id = $1 returning id`, [id])).toHaveLength(1);
+  });
+});
+
+describe("completing a chore assigned to your partner", () => {
+  const points = async (uid: string) =>
+    (await as(uid, `select points from public.profiles where id = $1`, [uid]))[0].points as number;
+  const assignee = async (id: string) =>
+    (await admin(`select assigned_to from public.chore_instances where id = $1`, [id]))[0].assigned_to;
+
+  it("keeps the assignee and credits them 100%, whoever taps Complete", async () => {
+    const [a0, b0] = [await points(ALEX), await points(BLAKE)];
+    const id = await chore(ALEX, "Blake's job", 4, BLAKE); // 30 min = 6 + 4 = 10
+    const [c] = await as(ALEX, `select * from public.complete_chore($1, 30, 100)`, [id]);
+    expect(c).toMatchObject({ user_a_id: BLAKE, user_a_points: 10, user_a_duration: 30, user_b_id: ALEX, user_b_points: 0 });
+    expect(await points(BLAKE)).toBe(b0 + 10);
+    expect(await points(ALEX)).toBe(a0); // the completer earns nothing for someone else's chore
+    expect(await assignee(id)).toBe(BLAKE); // and does not take the chore over
+  });
+
+  it("works the same the other way round", async () => {
+    const id = await chore(BLAKE, "Alex's job", 0, ALEX); // 15 min = 3
+    const [c] = await as(BLAKE, `select * from public.complete_chore($1, 15, 100)`, [id]);
+    expect(c).toMatchObject({ user_a_id: ALEX, user_a_points: 3, user_b_id: BLAKE, user_b_points: 0 });
+    expect(await assignee(id)).toBe(ALEX);
+  });
+
+  it("splits between the assignee (their share first) and the person who did the work", async () => {
+    const [a0, b0] = [await points(ALEX), await points(BLAKE)];
+    const id = await chore(ALEX, "Shared job", 3, BLAKE); // 25 min = 5 + 3 = 8
+    const [c] = await as(ALEX, `select * from public.complete_chore($1, 25, 60)`, [id]);
+    expect(c).toMatchObject({ user_a_id: BLAKE, user_a_points: 5, user_a_duration: 15, user_b_id: ALEX, user_b_points: 3, user_b_duration: 10 });
+    expect(await points(BLAKE)).toBe(b0 + 5);
+    expect(await points(ALEX)).toBe(a0 + 3);
+    expect(await assignee(id)).toBe(BLAKE);
+  });
+
+  it("tells the assignee it was done for them and what they earned", async () => {
+    const id = await chore(ALEX, "Notify me", 0, BLAKE); // 20 min = 4
+    await as(ALEX, `select * from public.complete_chore($1, 20, 100)`, [id]);
+    const notes = await as(BLAKE, `select message from public.notifications where reference_id = $1 and type = 'chore_completed'`, [id]);
+    expect(notes).toEqual([{ message: "Alex completed: Notify me for you (you earned 4 pts)" }]);
+    expect(await as(ALEX, `select 1 from public.notifications where reference_id = $1 and type = 'chore_completed'`, [id])).toHaveLength(0);
+  });
+
+  it("uncheck takes the points back from the assignee", async () => {
+    const b0 = await points(BLAKE);
+    const id = await chore(ALEX, "Undo me", 0, BLAKE);
+    await as(ALEX, `select * from public.complete_chore($1, 20, 100)`, [id]);
+    expect(await points(BLAKE)).toBe(b0 + 4);
+    await as(ALEX, `select public.uncomplete_chore($1)`, [id]);
+    expect(await points(BLAKE)).toBe(b0);
+    expect(await assignee(id)).toBe(BLAKE);
   });
 });

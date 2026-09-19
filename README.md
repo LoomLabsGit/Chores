@@ -6,7 +6,7 @@ Next.js (App Router) + Tailwind on Vercel, Supabase for Postgres, Auth and Realt
 ## Setup
 
 1. **Supabase project.** Create one, then apply the schema: paste each file in `supabase/migrations/` into the SQL editor,
-   **in order** (`0001_init.sql` … `0006_time_based_points.sql`), or use `supabase link` + `supabase db push`.
+   **in order** (`0001_init.sql` … `0007_credit_the_assignee.sql`), or use `supabase link` + `supabase db push`.
    Pushing code to GitHub never changes the database, so run any new migration file by hand.
 2. **Auth.** Email + password. If "Confirm email" is on, add `https://YOUR-DOMAIN/auth/callback` (and
    `http://localhost:3000/auth/callback`) under Authentication → URL Configuration.
@@ -60,7 +60,8 @@ in order (`0004_…`) and should be additive; a migration runs against live data
   The old per-chore "points" columns (`points_assigned`, `default_points`) are legacy and no longer read.
 - **Unassigned pool:** a chore with no assignee shows as an open task. Tap it to claim it, adjust its estimate/tax, or complete
   it straight away (completing claims it for you at 100% by default).
-- **Points go to whoever tapped Complete** (or are split between the two), not to the chore's assignee.
+- **Points go to the chore's assignee** (migration 0007), whoever taps Complete, and completing never changes the assignee. An
+  unassigned chore is claimed by whoever completes it. In a split, the first share belongs to the assignee.
 - **"Profile switcher"** is a profile menu (members, invite code, sign out): each partner signs in on their own device, so
   there is nothing to switch between.
 - **Common tasks** are matched by title against the six base chores; **Recent** is the five most recently scheduled.
