@@ -1,0 +1,89 @@
+name: Database migrations
+
+# Applies new files in supabase/migrations/ to the production Supabase project whenever
+# they land on main, so nobody has to paste SQL by hand. Vercel deploys the app separately.
+#
+# Needs three repository secrets (Settings -> Secrets and variables -> Actions):
+#   SUPABASE_ACCESS_TOKEN  personal access token (supabase.com/dashboard/account/tokens)
+#   SUPABASE_DB_PASSWORD   the project's database password
+#   SUPABASE_PROJECT_ID    the project ref, e.g. eagonrdlwctaxdbecyov
+# Until all three exist this workflow only prints a warning and changes nothing.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "supabase/migrations/**"
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: >-
+          ONE-TIME: mark these migrations as already applied (space-separated versions) because they
+          were run by hand before this automation existed. Leave empty afterwards.
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# Never run two migration jobs at once, and never cancel one halfway.
+concurrency:
+  group: database-migrations
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
+    steps:
+      - name: Check the Supabase secrets are set
+        id: gate
+        run: |
+          if [ -z "$SUPABASE_ACCESS_TOKEN" ] || [ -z "$SUPABASE_DB_PASSWORD" ] || [ -z "$SUPABASE_PROJECT_ID" ]; then
+            echo "::warning title=Migrations NOT applied::Add SUPABASE_ACCESS_TOKEN, SUPABASE_DB_PASSWORD and SUPABASE_PROJECT_ID as repository secrets, then re-run this workflow."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.ready == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.ready == 'true'
+        with:
+          node-version: 22
+          cache: npm
+
+      # The migrations must pass the SQL test suite before they get anywhere near production.
+      - name: Test the migrations
+        if: steps.gate.outputs.ready == 'true'
+        run: |
+          npm ci
+          npm run test:db
+
+      - uses: supabase/setup-cli@v1
+        if: steps.gate.outputs.ready == 'true'
+        with:
+          version: latest
+
+      - name: Link to the Supabase project
+        if: steps.gate.outputs.ready == 'true'
+        run: supabase link --project-ref "$SUPABASE_PROJECT_ID"
+
+      - name: Baseline (one-time)
+        if: steps.gate.outputs.ready == 'true' && inputs.baseline != ''
+        env:
+          VERSIONS: ${{ inputs.baseline }}
+        run: supabase migration repair --status applied $VERSIONS
+
+      - name: Show what will be applied
+        if: steps.gate.outputs.ready == 'true'
+        run: supabase db push --dry-run
+
+      - name: Apply migrations
+        if: steps.gate.outputs.ready == 'true'
+        run: supabase db push --yes
