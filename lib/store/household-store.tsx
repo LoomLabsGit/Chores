@@ -16,6 +16,7 @@ import { friendlyError } from "@/lib/errors";
 import { getSupabase } from "@/lib/supabase/client";
 import { calculatePoints, calculateSplit } from "@/lib/logic/points";
 import { addDays, parseISODate } from "@/lib/logic/dates";
+import type { LibraryUsage } from "@/lib/logic/library";
 import type { RepeatChoice } from "@/lib/logic/recurrence";
 import { uuid } from "@/lib/uuid";
 import type {
@@ -152,6 +153,12 @@ function reducer(state: State, action: Action): State {
 
 export type NewChore = { title: string; minutes: number; tax: number };
 
+/** A library chore as edited on the Manage screen. */
+export type LibraryInput = { title: string; category: string; minutes: number; tax: number };
+
+/** How many existing chores an edit reached. */
+export type LibraryPushResult = { open: number; series: number };
+
 /** Fields that can be changed on an unfinished chore without a special server function. */
 export type InstancePatch = Partial<
   Pick<ChoreInstance, "scheduled_date" | "assigned_to" | "estimated_duration" | "chore_tax">
@@ -181,7 +188,17 @@ export type Actions = {
   moveInstance: (id: string, patch: InstancePatch) => Promise<boolean>;
   scheduleChore: (chore: ChoreLibraryItem, date: string, assignedTo: string | null, opts?: ScheduleOptions) => Promise<boolean>;
   createAndScheduleChore: (chore: NewChore, date: string, assignedTo: string | null, repeat?: RepeatChoice) => Promise<boolean>;
-  archiveChore: (id: string) => Promise<boolean>;
+  /** Manage chores: add a chore to the library without putting it on the calendar. */
+  createLibraryChore: (input: LibraryInput) => Promise<boolean>;
+  /**
+   * Edit a library chore and push what changed to the chores already on the calendar.
+   * Resolves to how many it reached, or null when it failed (the error is already shown).
+   */
+  updateLibraryChore: (id: string, input: LibraryInput) => Promise<LibraryPushResult | null>;
+  /** Delete a library chore. Resolves to how many unfinished calendar chores were removed, or null on failure. */
+  deleteLibraryChore: (id: string, removeOpen: boolean) => Promise<number | null>;
+  /** Usage counts per library chore id; null when it could not be read. */
+  fetchLibraryUsage: () => Promise<Record<string, LibraryUsage> | null>;
   removeInstance: (id: string) => Promise<boolean>;
   editChore: (instance: ChoreInstance, edit: ChoreEdit) => Promise<boolean>;
   /** Undo a completion: takes the points back and returns the chore to unfinished. */
@@ -547,16 +564,80 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
         return api.scheduleChore(lib, date, assignedTo, opts);
       },
 
-      async archiveChore(id) {
-        const prev = stateRef.current.library.find((c) => c.id === id);
-        if (!prev) return false;
-        dispatch({ type: "upsert", key: "library", row: { ...prev, is_archived: true } });
-        const { error } = await supabase.from("chore_library").update({ is_archived: true }).eq("id", id);
-        if (error) {
-          dispatch({ type: "upsert", key: "library", row: prev });
-          return fail(error);
-        }
+      async createLibraryChore(input) {
+        const { data, error } = await supabase.rpc("create_library_chore", {
+          p_title: input.title,
+          p_category: input.category,
+          p_duration: input.minutes,
+          p_tax: input.tax,
+        });
+        if (error) return fail(error);
+        dispatch({ type: "upsert", key: "library", row: data as ChoreLibraryItem });
         return true;
+      },
+
+      async updateLibraryChore(id, input) {
+        const prev = stateRef.current.library.find((c) => c.id === id);
+        if (!prev) return null;
+        const { data, error } = await supabase.rpc("update_library_chore", {
+          p_chore_id: id,
+          p_title: input.title,
+          p_category: input.category,
+          p_duration: input.minutes,
+          p_tax: input.tax,
+        });
+        if (error) {
+          fail(error);
+          return null;
+        }
+        dispatch({
+          type: "upsert",
+          key: "library",
+          row: {
+            ...prev,
+            title: input.title.trim(),
+            category: input.category.trim() || "General",
+            default_duration: input.minutes,
+            chore_tax: input.tax,
+          },
+        });
+        // The server rewrote calendar chores too: re-read the visible week rather than guess which.
+        const range = rangeRef.current;
+        if (range) await loadWeek(range.from, range.to);
+        const row = (data as { n_open: number; n_series: number }[] | null)?.[0];
+        return { open: row?.n_open ?? 0, series: row?.n_series ?? 0 };
+      },
+
+      async deleteLibraryChore(id, removeOpen) {
+        const prev = stateRef.current.library.find((c) => c.id === id);
+        if (!prev) return null;
+        const { data, error } = await supabase.rpc("delete_library_chore", {
+          p_chore_id: id,
+          p_remove_open: removeOpen,
+        });
+        if (error) {
+          fail(error);
+          return null;
+        }
+        dispatch({ type: "upsert", key: "library", row: { ...prev, is_archived: true } });
+        if (removeOpen) {
+          const range = rangeRef.current;
+          if (range) await loadWeek(range.from, range.to);
+        }
+        return (data as number | null) ?? 0;
+      },
+
+      async fetchLibraryUsage() {
+        const { data, error } = await supabase.rpc("library_usage");
+        if (error) {
+          fail(error);
+          return null;
+        }
+        const usage: Record<string, LibraryUsage> = {};
+        for (const r of (data ?? []) as { library_id: string; open_count: number; done_count: number; repeating_count: number }[]) {
+          usage[r.library_id] = { open: r.open_count, done: r.done_count, repeating: r.repeating_count };
+        }
+        return usage;
       },
 
       async removeInstance(id) {

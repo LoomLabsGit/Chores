@@ -6,8 +6,8 @@ Next.js (App Router) + Tailwind on Vercel, Supabase for Postgres, Auth and Realt
 ## Setup
 
 1. **Supabase project.** Create one, then apply the schema: paste each file in `supabase/migrations/` into the SQL editor,
-   **in order** (`0001_init.sql` … `0007_credit_the_assignee.sql`), or use `supabase link` + `supabase db push`.
-   Pushing code to GitHub never changes the database, so run any new migration file by hand.
+   **in order** (`0001_init.sql` … `0008_manage_library.sql`), or use `supabase link` + `supabase db push`.
+   After the first setup, new migration files are applied for you (see below).
 2. **Auth.** Email + password. If "Confirm email" is on, add `https://YOUR-DOMAIN/auth/callback` (and
    `http://localhost:3000/auth/callback`) under Authentication → URL Configuration.
 3. **Env vars.** Copy `.env.example` to `.env.local` and fill in the project URL and publishable key. On Vercel add the same
@@ -62,6 +62,14 @@ in order (`0004_…`) and should be additive; a migration runs against live data
   it straight away (completing claims it for you at 100% by default).
 - **Points go to the chore's assignee** (migration 0007), whoever taps Complete, and completing never changes the assignee. An
   unassigned chore is claimed by whoever completes it. In a split, the first share belongs to the assignee.
+- **Manage chores** (`/manage`, migration 0008) is the library as a small CMS: create, edit and delete the chores you can
+  schedule, with search, category filter and usage counts. Editing pushes only the fields you changed to what is already
+  planned: a new **name** reaches every copy (finished ones too) and every repeating chore; a new **time or tax** reaches
+  unfinished copies and repeating chores (so later days follow); **category** stays in the library. Finished chores never have
+  their points or logged time rewritten. **Delete** archives the chore and stops it repeating; you choose whether its
+  unfinished calendar copies go too (finished chores and earned points are always kept). Deleting moved out of the Add chore
+  sheet, which now links here. The "Common" row still matches by the six original names, so renaming one drops it from Common
+  (it stays under Recent and All tasks).
 - **"Profile switcher"** is a profile menu (members, invite code, sign out): each partner signs in on their own device, so
   there is nothing to switch between.
 - **Common tasks** are matched by title against the six base chores; **Recent** is the five most recently scheduled.

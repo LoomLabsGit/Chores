@@ -10,7 +10,16 @@ import {
   toISODate,
   weekDays,
 } from "@/lib/logic/dates";
-import { allChoresAlphabetical, commonChores, recentChores } from "@/lib/logic/library";
+import {
+  allChoresAlphabetical,
+  commonChores,
+  describePush,
+  describeUsage,
+  filterLibrary,
+  libraryCategories,
+  recentChores,
+  titleTaken,
+} from "@/lib/logic/library";
 import { describeRepeat, frequencyFromRule, ordinal } from "@/lib/logic/recurrence";
 import {
   calculateBasePoints,
@@ -428,5 +437,67 @@ describe("recurrence helpers", () => {
     expect(describeRepeat("biweekly", "2026-09-19")).toBe("Repeats every other Saturday");
     expect(describeRepeat("monthly", "2026-09-19")).toBe("Repeats on the 19th of each month");
     expect(describeRepeat("monthly", "2026-01-31")).toContain("last day in shorter months");
+  });
+});
+
+describe("manage chores helpers", () => {
+  const items = [
+    lib({ id: "1", title: "Washing up", category: "Kitchen" }),
+    lib({ id: "2", title: "Hoovering", category: "Cleaning" }),
+    lib({ id: "3", title: "Cooking dinner", category: "kitchen" }), // same category, different case
+    lib({ id: "4", title: "Old chore", category: "Cleaning", is_archived: true }),
+    lib({ id: "5", title: "Untidy", category: "" }),
+  ];
+
+  it("lists each live category once, ignoring case and blanks", () => {
+    expect(libraryCategories(items)).toEqual(["Cleaning", "General", "Kitchen"]);
+  });
+
+  it("filters by search text (name or category) and category, never showing deleted chores", () => {
+    expect(filterLibrary(items, "", null).map((c) => c.title)).toEqual(["Cooking dinner", "Hoovering", "Untidy", "Washing up"]);
+    expect(filterLibrary(items, "  HOOV ", null).map((c) => c.id)).toEqual(["2"]);
+    expect(filterLibrary(items, "", "kitchen").map((c) => c.id)).toEqual(["3", "1"]);
+    expect(filterLibrary(items, "clean", null).map((c) => c.id)).toEqual(["2"]); // matches the category
+    expect(filterLibrary(items, "", "General").map((c) => c.id)).toEqual(["5"]); // blank category reads as General
+    expect(filterLibrary(items, "old", null)).toEqual([]);
+  });
+
+  it("spots a duplicate name, ignoring case, spaces, deleted chores and the chore being edited", () => {
+    expect(titleTaken(items, "  WASHING UP ")).toBe(true);
+    expect(titleTaken(items, "Washing up", "1")).toBe(false);
+    expect(titleTaken(items, "Old chore")).toBe(false);
+    expect(titleTaken(items, "   ")).toBe(false);
+  });
+
+  const before = { title: "Hoovering", minutes: 25, tax: 0 };
+  const usage = { open: 3, done: 12, repeating: 1 };
+
+  it("explains what a name change will touch", () => {
+    expect(describePush(before, { ...before, title: "Vacuuming" }, usage)).toEqual([
+      "The new name shows on 15 chores already on the calendar.",
+    ]);
+  });
+
+  it("explains what a time or tax change will touch, and reassures about finished chores", () => {
+    expect(describePush(before, { ...before, tax: 5 }, usage)).toEqual([
+      "The new tax applies to 3 unfinished chores and 1 repeating chore (every later day).",
+      "Finished chores keep the points they earned.",
+    ]);
+    expect(describePush(before, { ...before, minutes: 30, tax: 5 }, usage)[0]).toMatch(/^The new time and tax apply to /);
+    expect(describePush(before, { ...before, minutes: 30 }, { open: 1, done: 0, repeating: 0 })).toEqual([
+      "The new time applies to 1 unfinished chore.",
+    ]);
+  });
+
+  it("says nothing when nothing changes or nothing is planned", () => {
+    expect(describePush(before, before, usage)).toEqual([]);
+    expect(describePush(before, { ...before, title: "Hoover", tax: 3 }, { open: 0, done: 0, repeating: 0 })).toEqual([]);
+    expect(describePush(before, { ...before, title: "  Hoovering " }, usage)).toEqual([]); // whitespace only
+  });
+
+  it("describes usage for a list row", () => {
+    expect(describeUsage({ open: 3, done: 12, repeating: 1 })).toBe("3 on the calendar · 12 done · repeats");
+    expect(describeUsage({ open: 0, done: 1, repeating: 0 })).toBe("1 done");
+    expect(describeUsage({ open: 0, done: 0, repeating: 0 })).toBe("Not used yet");
   });
 });

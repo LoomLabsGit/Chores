@@ -61,6 +61,7 @@ beforeAll(async () => {
   await db.exec(read("supabase/migrations/0005_edit_completed_chore.sql"));
   await db.exec(read("supabase/migrations/0006_time_based_points.sql"));
   await db.exec(read("supabase/migrations/0007_credit_the_assignee.sql"));
+  await db.exec(read("supabase/migrations/0008_manage_library.sql"));
   for (const id of [ALEX, BLAKE, CASEY, DREW]) {
     await admin(`insert into auth.users (id, email) values ($1, $2)`, [id, `${id}@example.com`]);
   }
@@ -854,5 +855,186 @@ describe("completing a chore assigned to your partner", () => {
     await as(ALEX, `select public.uncomplete_chore($1)`, [id]);
     expect(await points(BLAKE)).toBe(b0);
     expect(await assignee(id)).toBe(BLAKE);
+  });
+});
+
+describe("manage library (create, edit across the board, delete)", () => {
+  const dayFromNow = async (n: number) => (await admin(`select (current_date + $1::int)::text as d`, [n]))[0].d as string;
+  let n = 0;
+
+  /** A library chore made the way the Manage screen makes it. */
+  async function lib(user: string, title = `Managed ${++n}`, category = "Kitchen", minutes = 15, tax = 2) {
+    const [row] = await as(user, `select * from public.create_library_chore($1, $2, $3, $4)`, [title, category, minutes, tax]);
+    return row as { id: string; title: string; category: string; default_duration: number; chore_tax: number; last_used_at: string | null };
+  }
+  /** A scheduled copy of a library chore. */
+  async function copy(user: string, chore: { id: string; title: string }, date: string, minutes = 15, tax = 2, who: string | null = user) {
+    const [row] = await as(
+      user,
+      `insert into public.chore_instances (chore_id, title, household_id, assigned_to, scheduled_date, estimated_duration, chore_tax)
+       values ($1, $2, public.current_household_id(), $3, $4, $5, $6) returning id`,
+      [chore.id, chore.title, who, date, minutes, tax],
+    );
+    return row.id as string;
+  }
+  const inst = async (id: string) =>
+    (await admin(`select title, estimated_duration as minutes, chore_tax as tax, is_completed as done from public.chore_instances where id = $1`, [id]))[0];
+  const update = (user: string, id: string, title: string, category: string, minutes: number, tax: number) =>
+    as(user, `select * from public.update_library_chore($1, $2, $3, $4, $5)`, [id, title, category, minutes, tax]);
+
+  it("creates a chore that is not 'recent' until it is scheduled, and tidies the input", async () => {
+    const c = await lib(ALEX, "  Clean oven  ", "  ", 45, 5);
+    expect(c).toMatchObject({ title: "Clean oven", category: "General", default_duration: 45, chore_tax: 5, last_used_at: null });
+  });
+
+  it("rejects duplicates (any case), blanks and out-of-range values; another household may reuse a name", async () => {
+    await lib(ALEX, "Unique name");
+    await expect(lib(BLAKE, "unique NAME")).rejects.toThrow(/already have a chore called/);
+    await expect(lib(ALEX, "   ")).rejects.toThrow(/name/);
+    await expect(lib(ALEX, "Bad time", "x", 7, 0)).rejects.toThrow(/multiple of 5/);
+    await expect(lib(ALEX, "Bad tax", "x", 15, 51)).rejects.toThrow(/between 0 and 50/);
+    await expect(lib(ALEX, "x".repeat(61))).rejects.toThrow(/60 characters/);
+    expect((await lib(DREW, "Unique name")).title).toBe("Unique name");
+  });
+
+  it("a renamed chore can be reused once the old holder is deleted", async () => {
+    const a = await lib(ALEX, "Recycle me");
+    await as(ALEX, `select public.delete_library_chore($1, false)`, [a.id]);
+    expect((await lib(ALEX, "Recycle me")).title).toBe("Recycle me");
+  });
+
+  it("pushes a new time and tax to unfinished copies, leaving finished ones' points alone", async () => {
+    const c = await lib(ALEX, undefined, "Kitchen", 15, 2);
+    const open = await copy(ALEX, c, await dayFromNow(2));
+    const done = await copy(ALEX, c, await dayFromNow(-3));
+    await as(ALEX, `select * from public.complete_chore($1, 15, 100)`, [done]);
+
+    const [r] = await update(ALEX, c.id, c.title, "Kitchen", 30, 5);
+    expect(r).toMatchObject({ n_open: 1, n_series: 0 });
+    expect(await inst(open)).toMatchObject({ minutes: 30, tax: 5 });
+    expect(await inst(done)).toMatchObject({ minutes: 15, tax: 2, done: true }); // history untouched
+    const [comp] = await admin(`select user_a_points from public.chore_completions where instance_id = $1`, [done]);
+    expect(comp.user_a_points).toBe(5); // 15 min = 3 + tax 2, paid out before the edit
+    expect((await admin(`select default_duration, chore_tax from public.chore_library where id = $1`, [c.id]))[0]).toEqual({ default_duration: 30, chore_tax: 5 });
+  });
+
+  it("a new name reaches every copy, finished ones too", async () => {
+    const c = await lib(ALEX, "Old name");
+    const open = await copy(ALEX, c, await dayFromNow(1));
+    const done = await copy(ALEX, c, await dayFromNow(-2));
+    await as(ALEX, `select * from public.complete_chore($1, 15, 100)`, [done]);
+    await update(ALEX, c.id, "Shiny new name", "Kitchen", 15, 2);
+    expect((await inst(open)).title).toBe("Shiny new name");
+    expect((await inst(done)).title).toBe("Shiny new name");
+  });
+
+  it("pushes only what changed: a tax change keeps a one-off time, a category change touches no copy", async () => {
+    const c = await lib(ALEX, undefined, "Kitchen", 15, 2);
+    const id = await copy(ALEX, c, await dayFromNow(1), 45, 2); // a one-off long day
+    await as(ALEX, `update public.chore_instances set title = 'One-off name' where id = $1`, [id]);
+
+    await update(ALEX, c.id, c.title, "Kitchen", 15, 8); // tax only
+    expect(await inst(id)).toMatchObject({ title: "One-off name", minutes: 45, tax: 8 });
+
+    const [r] = await update(ALEX, c.id, c.title, "Cleaning", 15, 8); // category only
+    expect(r).toMatchObject({ n_open: 0, n_series: 0 });
+    expect(await inst(id)).toMatchObject({ title: "One-off name", minutes: 45, tax: 8 });
+    expect((await admin(`select category from public.chore_library where id = $1`, [c.id]))[0].category).toBe("Cleaning");
+  });
+
+  it("updates a repeating chore, including days generated later", async () => {
+    const c = await lib(ALEX, undefined, "Kitchen", 15, 2);
+    const first = await copy(ALEX, c, await dayFromNow(1));
+    await as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [first]);
+    const sid = (await admin(`select parent_recurrence_id from public.chore_instances where id = $1`, [first]))[0].parent_recurrence_id;
+
+    const [r] = await update(ALEX, c.id, "Weekly renamed", "Kitchen", 20, 6);
+    expect(r.n_series).toBe(1);
+    expect(r.n_open).toBeGreaterThan(1);
+    const rows = await admin(`select title, estimated_duration m, chore_tax t from public.chore_instances where parent_recurrence_id = $1`, [sid]);
+    expect(new Set(rows.map((x) => `${x.title}|${x.m}|${x.t}`))).toEqual(new Set(["Weekly renamed|20|6"]));
+
+    await as(ALEX, `select public.extend_recurring_chores(current_date + 400)`); // generates days beyond the first 12 weeks
+    const later = await admin(`select title, estimated_duration m, chore_tax t from public.chore_instances where parent_recurrence_id = $1`, [sid]);
+    expect(later.length).toBeGreaterThan(rows.length);
+    expect(new Set(later.map((x) => `${x.title}|${x.m}|${x.t}`))).toEqual(new Set(["Weekly renamed|20|6"]));
+  });
+
+  it("rejects a rename onto an existing name, other households' chores, and deleted chores", async () => {
+    const a = await lib(ALEX, "Name A");
+    const b = await lib(ALEX, "Name B");
+    await expect(update(ALEX, b.id, "name a", "Kitchen", 15, 2)).rejects.toThrow(/already have a chore called/);
+    expect(await update(ALEX, a.id, "Name A", "Other", 15, 2)).toHaveLength(1); // keeping its own name is fine
+    await expect(update(DREW, a.id, "Hijack", "x", 15, 2)).rejects.toThrow(/not found/);
+    await expect(update(ALEX, a.id, "Name A", "x", 12, 2)).rejects.toThrow(/multiple of 5/);
+    await as(ALEX, `select public.delete_library_chore($1, false)`, [b.id]);
+    await expect(update(ALEX, b.id, "Name B", "x", 15, 2)).rejects.toThrow(/not found/);
+  });
+
+  it("does not notify anyone when it rewrites assigned chores", async () => {
+    const c = await lib(ALEX, undefined, "Kitchen", 15, 2);
+    await copy(ALEX, c, await dayFromNow(1), 15, 2, BLAKE);
+    const before = (await as(BLAKE, `select 1 from public.notifications`)).length;
+    await update(ALEX, c.id, `${c.title} v2`, "Kitchen", 25, 4);
+    expect((await as(BLAKE, `select 1 from public.notifications`)).length).toBe(before);
+  });
+
+  it("delete archives the chore and stops it repeating but keeps calendar copies when asked to", async () => {
+    const c = await lib(ALEX);
+    const first = await copy(ALEX, c, await dayFromNow(1));
+    await as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [first]);
+    const sid = (await admin(`select parent_recurrence_id from public.chore_instances where id = $1`, [first]))[0].parent_recurrence_id;
+    const before = (await admin(`select count(*)::int c from public.chore_instances where parent_recurrence_id = $1`, [sid]))[0].c;
+
+    expect((await as(ALEX, `select public.delete_library_chore($1, false) as removed`, [c.id]))[0].removed).toBe(0);
+    expect((await admin(`select is_archived from public.chore_library where id = $1`, [c.id]))[0].is_archived).toBe(true);
+    await as(ALEX, `select public.extend_recurring_chores(current_date + 400)`);
+    expect((await admin(`select count(*)::int c from public.chore_instances where parent_recurrence_id = $1`, [sid]))[0].c).toBe(before); // nothing new
+    expect((await inst(first)).done).toBe(false); // still on the calendar
+  });
+
+  it("delete can also remove unfinished copies, but never finished ones or their points", async () => {
+    const c = await lib(ALEX, undefined, "Kitchen", 15, 2);
+    const open = await copy(ALEX, c, await dayFromNow(1));
+    const done = await copy(ALEX, c, await dayFromNow(-1));
+    await as(ALEX, `select * from public.complete_chore($1, 15, 100)`, [done]);
+
+    expect((await as(ALEX, `select public.delete_library_chore($1, true) as removed`, [c.id]))[0].removed).toBe(1);
+    expect(await admin(`select 1 from public.chore_instances where id = $1`, [open])).toHaveLength(0);
+    expect(await admin(`select 1 from public.chore_instances where id = $1`, [done])).toHaveLength(1);
+    expect(await admin(`select 1 from public.chore_completions where instance_id = $1`, [done])).toHaveLength(1);
+  });
+
+  it("only your own household can delete, and a chore cannot be deleted twice", async () => {
+    const c = await lib(ALEX);
+    await expect(as(DREW, `select public.delete_library_chore($1, true)`, [c.id])).rejects.toThrow(/not found/);
+    await as(BLAKE, `select public.delete_library_chore($1, false)`, [c.id]); // either partner may
+    await expect(as(ALEX, `select public.delete_library_chore($1, false)`, [c.id])).rejects.toThrow(/not found/);
+  });
+
+  it("library_usage counts open, finished and repeating copies for live chores of your household only", async () => {
+    const c = await lib(ALEX, "Usage counted", "Kitchen", 15, 2);
+    const a = await copy(ALEX, c, await dayFromNow(1));
+    await copy(ALEX, c, await dayFromNow(9));
+    const d = await copy(ALEX, c, await dayFromNow(-1));
+    await as(ALEX, `select * from public.complete_chore($1, 15, 100)`, [d]);
+    await as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [a]);
+    const gone = await lib(ALEX, "Usage gone");
+    await as(ALEX, `select public.delete_library_chore($1, false)`, [gone.id]);
+
+    const rows = await as(BLAKE, `select * from public.library_usage()`);
+    const mine = rows.find((r) => r.library_id === c.id)!;
+    expect(mine.done_count).toBe(1);
+    expect(mine.repeating_count).toBe(1);
+    expect(mine.open_count).toBeGreaterThanOrEqual(2);
+    expect(rows.find((r) => r.library_id === gone.id)).toBeUndefined();
+    expect((await as(DREW, `select * from public.library_usage()`)).find((r) => r.library_id === c.id)).toBeUndefined();
+  });
+
+  it("the new functions are closed to anonymous callers", async () => {
+    await expect(asAnon(`select * from public.library_usage()`)).rejects.toThrow(/permission denied/);
+    await expect(asAnon(`select * from public.create_library_chore('x', 'x', 15, 0)`)).rejects.toThrow(/permission denied/);
+    await expect(asAnon(`select * from public.update_library_chore(gen_random_uuid(), 'x', 'x', 15, 0)`)).rejects.toThrow(/permission denied/);
+    await expect(asAnon(`select public.delete_library_chore(gen_random_uuid(), true)`)).rejects.toThrow(/permission denied/);
   });
 });

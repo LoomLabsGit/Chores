@@ -14,6 +14,7 @@ const NAV: { href: string; label: string; icon: IconName }[] = [
   { href: "/challenges", label: "Challenges", icon: "trophy" },
   { href: "/stats", label: "Stats", icon: "chart" },
   { href: "/shop", label: "Rewards", icon: "gift" },
+  { href: "/manage", label: "Manage", icon: "sliders" },
 ];
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -82,7 +83,7 @@ function NavBar() {
       aria-label="Primary"
       className="fixed inset-x-0 bottom-0 z-40 border-t border-line bg-surface/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-md md:inset-y-0 md:left-0 md:right-auto md:w-24 md:border-r md:border-t-0 md:pb-0 md:pt-20"
     >
-      <ul className="mx-auto grid h-16 max-w-md grid-cols-4 md:h-auto md:max-w-none md:grid-cols-1 md:gap-2 md:px-2">
+      <ul className="mx-auto grid h-16 max-w-md grid-cols-5 md:h-auto md:max-w-none md:grid-cols-1 md:gap-2 md:px-2">
         {NAV.map((item) => {
           const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
           return (

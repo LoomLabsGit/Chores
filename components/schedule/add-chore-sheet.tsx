@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 import { formatLongDay } from "@/lib/logic/dates";
 import { allChoresAlphabetical, commonChores, recentChores } from "@/lib/logic/library";
@@ -11,7 +12,7 @@ import { Icon } from "../icons";
 import { useToast } from "../toast";
 import { fieldClass, primaryButton } from "../ui/controls";
 import { AssigneeField, DurationField, RewardPreview, TaxField } from "../ui/points-controls";
-import { ConfirmDialog, Modal } from "../ui/modal";
+import { Modal } from "../ui/modal";
 
 /** What the user picked in step 1, waiting for "when / who / repeat" in step 2. */
 type Draft =
@@ -71,51 +72,30 @@ function Sheet({ date, onClose, onAdded }: Omit<Props, "open">) {
       {draft ? (
         <WhenWhoRepeat draft={draft} date={date} onClose={onClose} onAdded={onAdded} />
       ) : (
-        <Library onPick={(chore) => setDraft({ kind: "library", chore })} />
+        <Library onPick={(chore) => setDraft({ kind: "library", chore })} onManage={onClose} />
       )}
     </Modal>
   );
 }
 
-function Pill({
-  chore,
-  onPick,
-  onDelete,
-}: {
-  chore: ChoreLibraryItem;
-  onPick: (c: ChoreLibraryItem) => void;
-  onDelete?: (c: ChoreLibraryItem) => void;
-}) {
+function Pill({ chore, onPick }: { chore: ChoreLibraryItem; onPick: (c: ChoreLibraryItem) => void }) {
   return (
-    <span className="inline-flex shrink-0 items-center rounded-full border border-line bg-surface shadow-card">
-      <button
-        onClick={() => onPick(chore)}
-        className={`flex min-h-11 items-center gap-2 py-1 pl-4 text-[15px] font-bold ${onDelete ? "pr-1" : "pr-4"}`}
-      >
-        {chore.title}
-        <span className="flex items-center gap-0.5 text-xs font-extrabold text-gold">
-          <Icon name="bolt" size={11} />
-          {calculatePoints(chore.default_duration, chore.chore_tax)}
-        </span>
-      </button>
-      {onDelete && (
-        <button
-          onClick={() => onDelete(chore)}
-          aria-label={`Delete ${chore.title} from library`}
-          className="flex h-11 w-11 items-center justify-center rounded-full text-muted hover:text-danger"
-        >
-          <Icon name="x" size={16} />
-        </button>
-      )}
-    </span>
+    <button
+      onClick={() => onPick(chore)}
+      className="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-full border border-line bg-surface px-4 py-1 text-[15px] font-bold shadow-card"
+    >
+      {chore.title}
+      <span className="flex items-center gap-0.5 text-xs font-extrabold text-gold">
+        <Icon name="bolt" size={11} />
+        {calculatePoints(chore.default_duration, chore.chore_tax)}
+      </span>
+    </button>
   );
 }
 
 /** Step 1: choose from the library (or type a new chore in the docked input). */
-function Library({ onPick }: { onPick: (c: ChoreLibraryItem) => void }) {
-  const { state, actions } = useHousehold();
-  const { toast } = useToast();
-  const [pendingDelete, setPendingDelete] = useState<ChoreLibraryItem | null>(null);
+function Library({ onPick, onManage }: { onPick: (c: ChoreLibraryItem) => void; onManage: () => void }) {
+  const { state } = useHousehold();
 
   const recent = recentChores(state.library);
   const common = commonChores(state.library);
@@ -152,9 +132,19 @@ function Library({ onPick }: { onPick: (c: ChoreLibraryItem) => void }) {
       )}
 
       <section aria-labelledby="all-h">
-        <h3 id="all-h" className="mb-2 text-xs font-extrabold uppercase tracking-wide text-muted">
-          All tasks
-        </h3>
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <h3 id="all-h" className="text-xs font-extrabold uppercase tracking-wide text-muted">
+            All tasks
+          </h3>
+          <Link
+            href="/manage"
+            onClick={onManage}
+            className="flex min-h-11 items-center gap-1.5 rounded-full px-3 text-sm font-bold text-brand hover:bg-brand-soft"
+          >
+            <Icon name="sliders" size={16} />
+            Manage chores
+          </Link>
+        </div>
         {all.length === 0 ? (
           <p className="rounded-2xl bg-raised px-4 py-6 text-center text-sm text-muted">
             Your library is empty. Type a chore below to create your first one.
@@ -162,25 +152,12 @@ function Library({ onPick }: { onPick: (c: ChoreLibraryItem) => void }) {
         ) : (
           <div className="flex flex-wrap gap-2">
             {all.map((c) => (
-              <Pill key={c.id} chore={c} onPick={onPick} onDelete={setPendingDelete} />
+              <Pill key={c.id} chore={c} onPick={onPick} />
             ))}
           </div>
         )}
       </section>
 
-      <ConfirmDialog
-        open={!!pendingDelete}
-        title="Delete chore?"
-        message="Are you sure you want to delete this chore from your library?"
-        confirmLabel="Delete"
-        danger
-        onCancel={() => setPendingDelete(null)}
-        onConfirm={() => {
-          const chore = pendingDelete;
-          setPendingDelete(null);
-          if (chore) void actions.archiveChore(chore.id).then((ok) => ok && toast(`${chore.title} removed from your library`));
-        }}
-      />
     </div>
   );
 }
