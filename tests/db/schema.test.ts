@@ -52,6 +52,7 @@ beforeAll(async () => {
   db = new PGlite();
   await db.exec(read("tests/db/supabase-stub.sql"));
   await db.exec(read("supabase/migrations/0001_init.sql"));
+  await db.exec(read("supabase/migrations/0002_remove_completed_chore.sql"));
   for (const id of [ALEX, BLAKE, CASEY, DREW]) {
     await admin(`insert into auth.users (id, email) values ($1, $2)`, [id, `${id}@example.com`]);
   }
@@ -358,5 +359,65 @@ describe("notifications", () => {
     await expect(as(ALEX, `update public.notifications set message = 'x' where recipient_id = $1`, [ALEX])).rejects.toThrow(/permission denied/);
     const mine = await as(BLAKE, `update public.notifications set is_read = true where recipient_id = $1 returning id`, [BLAKE]);
     expect(mine.length).toBeGreaterThan(0);
+  });
+});
+
+describe("remove_completed_chore", () => {
+  const points = async (uid: string) =>
+    (await as(uid, `select points from public.profiles where id = $1`, [uid]))[0].points as number;
+  const count = async (sql: string, params: unknown[]) => (await admin(sql, params)).length;
+
+  it("takes back both partners' points and deletes the chore, completion and its notifications", async () => {
+    const [a0, b0] = [await points(ALEX), await points(BLAKE)];
+    const id = await chore(ALEX, "Undo me", 10);
+    await as(ALEX, `select * from public.complete_chore($1, 30, 60)`, [id]); // Alex +6, Blake +4
+    expect(await points(ALEX)).toBe(a0 + 6);
+    expect(await points(BLAKE)).toBe(b0 + 4);
+    expect(await count(`select 1 from public.notifications where message like '%Undo me%'`, [])).toBeGreaterThan(0);
+
+    await as(ALEX, `select public.remove_completed_chore($1)`, [id]);
+
+    expect(await points(ALEX)).toBe(a0);
+    expect(await points(BLAKE)).toBe(b0);
+    expect(await count(`select 1 from public.chore_instances where id = $1`, [id])).toBe(0);
+    expect(await count(`select 1 from public.chore_completions where instance_id = $1`, [id])).toBe(0);
+    expect(await count(`select 1 from public.notifications where message like '%Undo me%'`, [])).toBe(0);
+  });
+
+  it("either partner can remove it", async () => {
+    const id = await chore(ALEX, "Partner removes", 4);
+    await as(ALEX, `select * from public.complete_chore($1, 10, 100)`, [id]);
+    await as(BLAKE, `select public.remove_completed_chore($1)`, [id]);
+    expect(await count(`select 1 from public.chore_instances where id = $1`, [id])).toBe(0);
+  });
+
+  it("floors a balance at zero if the points were already spent", async () => {
+    const id = await chore(ALEX, "Already spent", 8);
+    await as(ALEX, `select * from public.complete_chore($1, 10, 100)`, [id]);
+    await admin(`update public.profiles set points = 2 where id = $1`, [ALEX]);
+    await as(ALEX, `select public.remove_completed_chore($1)`, [id]);
+    expect(await points(ALEX)).toBe(0);
+  });
+
+  it("also removes a not-yet-completed chore without touching points", async () => {
+    const before = await points(ALEX);
+    const id = await chore(ALEX, "Never done", 5);
+    await as(ALEX, `select public.remove_completed_chore($1)`, [id]);
+    expect(await points(ALEX)).toBe(before);
+    expect(await count(`select 1 from public.chore_instances where id = $1`, [id])).toBe(0);
+  });
+
+  it("is limited to your own household and to signed-in users", async () => {
+    const id = await chore(ALEX, "Not yours to remove", 3);
+    await as(ALEX, `select * from public.complete_chore($1, 5, 100)`, [id]);
+    await expect(as(DREW, `select public.remove_completed_chore($1)`, [id])).rejects.toThrow(/not found/i);
+    await expect(asAnon(`select public.remove_completed_chore($1)`, [id])).rejects.toThrow(/permission denied/);
+    expect(await count(`select 1 from public.chore_instances where id = $1`, [id])).toBe(1);
+  });
+
+  it("direct deletes of completed chores are still blocked (the function is the only way)", async () => {
+    const id = await chore(ALEX, "Direct delete", 2);
+    await as(ALEX, `select * from public.complete_chore($1, 5, 100)`, [id]);
+    expect(await as(ALEX, `delete from public.chore_instances where id = $1 returning id`, [id])).toHaveLength(0);
   });
 });

@@ -26,13 +26,14 @@ import {
 } from "@/lib/logic/dates";
 import { useMediaQuery } from "@/lib/use-media-query";
 import { useHousehold } from "@/lib/store/household-store";
-import type { ChoreInstance } from "@/lib/types";
+import type { ChoreCompletion, ChoreInstance } from "@/lib/types";
 import { Icon } from "../icons";
 import { useToast } from "../toast";
 import { Avatar, EmptyState, TONE_SOFT } from "../ui/controls";
 import { AddChoreSheet } from "./add-chore-sheet";
 import { ChoreCard, ChoreCardView } from "./chore-card";
 import { CompleteSheet } from "./complete-sheet";
+import { ConfirmDialog } from "../ui/modal";
 
 // Pointer position decides the drop target; rect overlap is the keyboard fallback (no pointer).
 const collision: CollisionDetection = (args) => {
@@ -50,6 +51,7 @@ export function ScheduleView() {
   const [selected, setSelected] = useState(today);
   const [addOpen, setAddOpen] = useState(false);
   const [completing, setCompleting] = useState<ChoreInstance | null>(null);
+  const [removing, setRemoving] = useState<ChoreInstance | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
 
   const days = useMemo(() => weekDays(weekStart), [weekStart]);
@@ -131,6 +133,7 @@ export function ScheduleView() {
                 instances={byDate[d]}
                 onSelect={() => setSelected(d)}
                 onOpen={setCompleting}
+                onRemove={setRemoving}
               />
             ))}
           </div>
@@ -166,7 +169,7 @@ export function ScheduleView() {
                 </EmptyState>
               ) : (
                 selectedList.map((inst) => (
-                  <ChoreCard key={inst.id} instance={inst} overdue={inst.scheduled_date < today} onOpen={setCompleting} />
+                  <ChoreCard key={inst.id} instance={inst} overdue={inst.scheduled_date < today} onOpen={setCompleting} onRemove={setRemoving} />
                 ))
               )}
             </section>
@@ -197,6 +200,19 @@ export function ScheduleView() {
 
       <AddChoreSheet open={addOpen} date={selected} onClose={() => setAddOpen(false)} />
       <CompleteSheet instance={completing} onClose={() => setCompleting(null)} />
+      <ConfirmDialog
+        open={!!removing}
+        title="Remove completed chore?"
+        message={removeMessage(removing, state.completions, nameOf)}
+        confirmLabel="Remove"
+        danger
+        onCancel={() => setRemoving(null)}
+        onConfirm={() => {
+          const inst = removing;
+          setRemoving(null);
+          if (inst) void actions.removeInstance(inst.id).then((ok) => ok && toast(`Removed ${inst.title}`));
+        }}
+      />
     </DndContext>
   );
 }
@@ -304,6 +320,7 @@ function DayColumn({
   instances,
   onSelect,
   onOpen,
+  onRemove,
 }: {
   date: string;
   today: string;
@@ -311,6 +328,7 @@ function DayColumn({
   instances: ChoreInstance[];
   onSelect: () => void;
   onOpen: (i: ChoreInstance) => void;
+  onRemove: (i: ChoreInstance) => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: `day:${date}` });
   const isToday = date === today;
@@ -337,7 +355,7 @@ function DayColumn({
         <p className="px-2 pt-4 text-center text-xs font-semibold text-muted">Free day</p>
       ) : (
         instances.map((inst) => (
-          <ChoreCard key={inst.id} instance={inst} overdue={inst.scheduled_date < today} onOpen={onOpen} compact />
+          <ChoreCard key={inst.id} instance={inst} overdue={inst.scheduled_date < today} onOpen={onOpen} onRemove={onRemove} compact />
         ))
       )}
     </section>
@@ -378,4 +396,25 @@ function AssignZone({ id, name, tone, current }: { id: string; name: string; ton
       </span>
     </div>
   );
+}
+
+/** Spells out exactly whose points will be taken back before the user confirms. */
+function removeMessage(
+  inst: ChoreInstance | null,
+  completions: Record<string, ChoreCompletion>,
+  nameOf: (id: string | null) => string,
+): string {
+  if (!inst) return "";
+  const c = completions[inst.id];
+  const takeBack = c
+    ? [
+        [c.user_a_id, c.user_a_points],
+        ...(c.user_b_id !== c.user_a_id ? [[c.user_b_id, c.user_b_points]] : []),
+      ]
+        .filter(([, pts]) => (pts as number) > 0)
+        .map(([id, pts]) => `${nameOf(id as string)} \u2212${pts}`)
+    : [];
+  return takeBack.length
+    ? `"${inst.title}" will be deleted and its points taken back (${takeBack.join(", ")}). It will also disappear from Stats.`
+    : `"${inst.title}" will be deleted. It will also disappear from Stats.`;
 }

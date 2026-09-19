@@ -500,6 +500,27 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
         const prev = stateRef.current.instances[id];
         if (!prev) return false;
         dispatch({ type: "instance-remove", id });
+
+        if (prev.is_completed) {
+          // Completed chores go through a server function that also takes the points back.
+          const completion = stateRef.current.completions[id];
+          if (completion) {
+            dispatch({ type: "completion-remove", instanceId: id });
+            dispatch({ type: "points", userId: completion.user_a_id, delta: -completion.user_a_points });
+            if (completion.user_b_id !== completion.user_a_id) {
+              dispatch({ type: "points", userId: completion.user_b_id, delta: -completion.user_b_points });
+            }
+          }
+          const { error } = await supabase.rpc("remove_completed_chore", { p_instance_id: id });
+          if (error) {
+            dispatch({ type: "instance", row: prev });
+            if (completion) dispatch({ type: "completion", row: completion });
+            resync();
+            return fail(error);
+          }
+          return true;
+        }
+
         const { data, error } = await supabase.from("chore_instances").delete().eq("id", id).select("id");
         if (error || !data?.length) {
           dispatch({ type: "instance", row: prev });

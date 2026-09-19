@@ -13,17 +13,29 @@ type Props = {
   onOpen: (i: ChoreInstance) => void;
   /** Narrow vertical layout for the seven-column desktop board. */
   compact?: boolean;
+  /** Shown as a trash button on completed cards. */
+  onRemove?: (i: ChoreInstance) => void;
 };
 
 /** Draggable card. The 44px grip is the only drag activator, so the rest of the card scrolls and taps normally on touch. */
-export function ChoreCard({ instance, overdue, onOpen, compact }: Props) {
+export function ChoreCard({ instance, overdue, onOpen, compact, onRemove }: Props) {
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, isDragging } = useDraggable({
     id: instance.id,
     disabled: instance.is_completed,
   });
 
   const handle = instance.is_completed ? (
-    <span aria-hidden className="h-11 w-2 shrink-0" />
+    onRemove ? (
+      <button
+        onClick={() => onRemove(instance)}
+        aria-label={`Remove completed chore ${instance.title}`}
+        className="flex h-11 w-9 shrink-0 items-center justify-center rounded-xl text-muted hover:bg-danger-soft hover:text-danger"
+      >
+        <Icon name="trash" size={18} />
+      </button>
+    ) : (
+      <span aria-hidden className="h-11 w-2 shrink-0" />
+    )
   ) : (
     <button
       ref={setActivatorNodeRef}
