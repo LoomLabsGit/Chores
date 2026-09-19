@@ -15,21 +15,24 @@ import type { ChoreInstance } from "@/lib/types";
 import { Icon } from "../icons";
 import { useToast } from "../toast";
 import { Avatar, primaryButton } from "../ui/controls";
-import { DurationField } from "../ui/points-controls";
-import { ConfirmDialog, Modal } from "../ui/modal";
+import { DurationField, SplitControl } from "../ui/points-controls";
+import { Modal } from "../ui/modal";
 
 export function CompleteSheet({
   instance,
   onClose,
   onEdit,
+  onRemove,
 }: {
   instance: ChoreInstance | null;
   onClose: () => void;
   onEdit: (i: ChoreInstance) => void;
+  /** Deleting goes through the schedule's own flow, which asks "just this one" or "all" for repeating chores. */
+  onRemove: (i: ChoreInstance) => void;
 }) {
   return (
     <Modal open={!!instance} onClose={onClose} title={instance?.title ?? "Complete chore"} variant="sheet">
-      {instance && <CompleteForm key={instance.id} instance={instance} onClose={onClose} onEdit={onEdit} />}
+      {instance && <CompleteForm key={instance.id} instance={instance} onClose={onClose} onEdit={onEdit} onRemove={onRemove} />}
     </Modal>
   );
 }
@@ -38,10 +41,12 @@ function CompleteForm({
   instance,
   onClose,
   onEdit,
+  onRemove,
 }: {
   instance: ChoreInstance;
   onClose: () => void;
   onEdit: (i: ChoreInstance) => void;
+  onRemove: (i: ChoreInstance) => void;
 }) {
   const { me, partner, state, tone, nameOf, actions } = useHousehold();
   const { toast } = useToast();
@@ -51,7 +56,6 @@ function CompleteForm({
   const [split, setSplit] = useState(false);
   const [ownerPct, setOwnerPct] = useState(50);
   const [busy, setBusy] = useState(false);
-  const [confirmRemove, setConfirmRemove] = useState(false);
 
   // Points go to whoever the chore is assigned to, not to whoever taps Complete.
   // An unassigned chore is claimed by you. The split slider always runs owner -> other.
@@ -99,61 +103,16 @@ function CompleteForm({
         <DurationField inputId="duration" value={minutes} onChange={setMinutes} steps={COMPLETION_STEPS} label="Minutes taken" />
       </section>
 
-      <section className="rounded-3xl border border-line p-4">
-        <div className="flex min-h-11 items-center justify-between gap-3">
-          <div className="min-w-0">
-            <p id="split-label" className="font-extrabold">
-              Split effort with partner
-            </p>
-            {!partner && <p className="text-xs text-muted">Invite your partner to split chores.</p>}
-          </div>
-          <button
-            role="switch"
-            aria-checked={split}
-            aria-labelledby="split-label"
-            disabled={!partner}
-            onClick={() => setSplit((s) => !s)}
-            className={`relative h-8 w-14 shrink-0 rounded-full transition-colors disabled:opacity-40 ${split ? "bg-brand" : "bg-line"}`}
-          >
-            <span
-              className={`absolute left-0 top-1 h-6 w-6 rounded-full bg-white shadow transition-transform ${split ? "translate-x-7" : "translate-x-1"}`}
-            />
-          </button>
-        </div>
-
-        {split && partner && (
-          <div className="mt-3 flex flex-col gap-1">
-            <div className="flex items-center gap-2">
-              <div className="flex w-12 shrink-0 flex-col items-center gap-0.5">
-                <Avatar name={owner.display_name} tone={ownerTone} size={40} />
-                <span className="max-w-full truncate text-[11px] font-bold text-muted">{owner.display_name}</span>
-              </div>
-              <input
-                type="range"
-                min={0}
-                max={100}
-                step={10}
-                value={ownerPct}
-                onChange={(e) => setOwnerPct(Number(e.target.value))}
-                aria-label={`${owner.display_name}'s share of the effort`}
-                aria-valuetext={`${owner.display_name} ${ownerPct} percent, ${other?.display_name} ${100 - ownerPct} percent`}
-                className="split-range flex-1"
-                style={
-                  {
-                    "--fill": `${ownerPct}%`,
-                    "--left": `var(--${ownerTone})`,
-                    "--right": `var(--${otherTone})`,
-                  } as React.CSSProperties
-                }
-              />
-              <div className="flex w-12 shrink-0 flex-col items-center gap-0.5">
-                <Avatar name={other?.display_name ?? ""} tone={otherTone} size={40} />
-                <span className="max-w-full truncate text-[11px] font-bold text-muted">{other?.display_name}</span>
-              </div>
-            </div>
-          </div>
-        )}
-      </section>
+      <SplitControl
+        owner={owner}
+        other={other}
+        ownerTone={ownerTone}
+        otherTone={otherTone}
+        enabled={split}
+        onToggle={() => setSplit((v) => !v)}
+        pct={ownerPct}
+        onPct={setOwnerPct}
+      />
 
       <section aria-label="Points breakdown" className="rounded-3xl border border-line bg-raised p-4 text-[15px]">
         <div className="flex items-baseline justify-between gap-3">
@@ -212,7 +171,7 @@ function CompleteForm({
             Edit chore
           </button>
           <button
-            onClick={() => setConfirmRemove(true)}
+            onClick={() => onRemove(instance)}
             className="min-h-11 rounded-2xl text-sm font-bold text-danger hover:bg-danger-soft"
           >
             Remove
@@ -220,19 +179,6 @@ function CompleteForm({
         </div>
       </div>
 
-      <ConfirmDialog
-        open={confirmRemove}
-        title="Remove this chore?"
-        message={`"${instance.title}" will be removed from ${formatLongDay(instance.scheduled_date)} only. Any other days stay as they are.`}
-        confirmLabel="Remove"
-        danger
-        onCancel={() => setConfirmRemove(false)}
-        onConfirm={() => {
-          setConfirmRemove(false);
-          onClose();
-          void actions.removeInstance(instance.id);
-        }}
-      />
     </div>
   );
 }

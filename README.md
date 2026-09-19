@@ -6,7 +6,7 @@ Next.js (App Router) + Tailwind on Vercel, Supabase for Postgres, Auth and Realt
 ## Setup
 
 1. **Supabase project.** Create one, then apply the schema: paste each file in `supabase/migrations/` into the SQL editor,
-   **in order** (`0001_init.sql` … `0008_manage_library.sql`), or use `supabase link` + `supabase db push`.
+   **in order** (`0001_init.sql` … `0010_challenge_controls.sql`), or use `supabase link` + `supabase db push`.
    After the first setup, new migration files are applied for you (see below).
 2. **Auth.** Email + password. If "Confirm email" is on, add `https://YOUR-DOMAIN/auth/callback` (and
    `http://localhost:3000/auth/callback`) under Authentication → URL Configuration.
@@ -66,10 +66,24 @@ in order (`0004_…`) and should be additive; a migration runs against live data
   schedule, with search, category filter and usage counts. Editing pushes only the fields you changed to what is already
   planned: a new **name** reaches every copy (finished ones too) and every repeating chore; a new **time or tax** reaches
   unfinished copies and repeating chores (so later days follow); **category** stays in the library. Finished chores never have
-  their points or logged time rewritten. **Delete** archives the chore and stops it repeating; you choose whether its
+  their logged time rewritten; a tax change re-prices them (see the ledger below) unless you untick that box. **Delete** archives the chore and stops it repeating; you choose whether its
   unfinished calendar copies go too (finished chores and earned points are always kept). Deleting moved out of the Add chore
   sheet, which now links here. The "Common" row still matches by the six original names, so renaming one drops it from Common
   (it stays under Recent and All tasks).
+- **Dynamic ledger** (migration 0009): editing a finished chore (time logged, chore tax, split or who it is for) recalculates
+  its total, works out each person's difference (new share minus old share) and credits or debits their balance straight away.
+  The same happens when a tax change in Manage chores re-prices finished copies, and when a completed challenge's reward or
+  owner is edited. Uncheck and delete keep working because they read the re-priced completion. A balance never goes below 0,
+  so if points were already spent it stops there and the reported change is the real one. The partner gets a notification.
+  The calculation lives in `public.reprice_completion()` (internal) and `lib/logic/ledger.ts`, which the edit sheet uses to
+  preview the exact difference; keep the two in step. Completions now store `owner_percent` so they can be re-priced exactly.
+- **Deleting a repeating chore** asks "Just this one" or "All". All removes every unfinished day and stops it repeating
+  (`remove_chore_series`); finished days are kept. Non-repeating chores keep the plain confirmation.
+- **Challenge controls** (migration 0010): either partner can manage any challenge. Every challenge has a - and a count, and
+  the - is the one way to take progress back: on an active challenge it steps down; on a finished one it reopens the challenge
+  (after a confirmation) and takes the reward back. The ... menu adds Edit (name, target, reward, who it is for), Give/Take
+  (reassigning asks the new person to accept, keeping progress), Reset progress and Delete (a finished challenge's reward is
+  taken back). Only the person a challenge is for can add progress. Declined challenges stay visible so they can be managed.
 - **"Profile switcher"** is a profile menu (members, invite code, sign out): each partner signs in on their own device, so
   there is nothing to switch between.
 - **Common tasks** are matched by title against the six base chores; **Recent** is the five most recently scheduled.

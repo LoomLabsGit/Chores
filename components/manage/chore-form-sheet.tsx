@@ -11,6 +11,7 @@ import {
   titleTaken,
   type LibraryUsage,
 } from "@/lib/logic/library";
+import { formatDelta } from "@/lib/logic/ledger";
 import { ESTIMATE_STEPS, snapMinutes } from "@/lib/logic/points";
 import { useHousehold } from "@/lib/store/household-store";
 import type { ChoreLibraryItem } from "@/lib/types";
@@ -61,6 +62,7 @@ function Form({
   const [category, setCategory] = useState(original.category);
   const [minutes, setMinutes] = useState(original.minutes);
   const [tax, setTax] = useState(original.tax);
+  const [reprice, setReprice] = useState(true);
   const [busy, setBusy] = useState(false);
 
   const name = title.trim();
@@ -75,8 +77,11 @@ function Form({
         { title: original.title, minutes: original.minutes, tax: original.tax },
         { title: name, minutes, tax },
         usage ?? NO_USAGE,
+        reprice,
       )
     : [];
+  // Only a tax change reaches finished chores, so that is the only time the choice matters.
+  const askReprice = !!chore && tax !== original.tax && (usage?.done ?? 0) > 0;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -91,7 +96,7 @@ function Form({
       toast(`Added ${name} to your library`, "success");
       return;
     }
-    const result = await actions.updateLibraryChore(chore.id, input);
+    const result = await actions.updateLibraryChore(chore.id, input, { repriceFinished: reprice });
     setBusy(false);
     if (!result) return;
     onClose();
@@ -99,7 +104,16 @@ function Form({
       result.open > 0 ? `${result.open} on the calendar` : null,
       result.series > 0 ? `${result.series} repeating` : null,
     ].filter(Boolean);
-    toast(reached.length ? `Saved ${name}. Updated ${reached.join(" and ")}` : `Saved ${name}`, "success");
+    const ledger =
+      result.done > 0
+        ? `. Re-priced ${result.done} finished (${result.myDelta === 0 ? "your balance unchanged" : `you ${formatDelta(result.myDelta)} pts`}${
+            result.theirDelta !== 0 ? `, partner ${formatDelta(result.theirDelta)}` : ""
+          })`
+        : "";
+    toast(
+      reached.length ? `Saved ${name}. Updated ${reached.join(" and ")}${ledger}` : `Saved ${name}${ledger}`,
+      "success",
+    );
   }
 
   return (
@@ -163,6 +177,22 @@ function Form({
             <p className="mt-0.5 font-semibold text-muted">
               Change the name, time or tax and it&rsquo;s applied to this chore everywhere it is planned.
             </p>
+          )}
+          {askReprice && (
+            <label className="mt-3 flex min-h-11 cursor-pointer items-start gap-3 rounded-xl bg-surface px-3 py-2.5 text-sm font-bold">
+              <input
+                type="checkbox"
+                checked={reprice}
+                onChange={(e) => setReprice(e.target.checked)}
+                className="mt-0.5 h-5 w-5 shrink-0 accent-[var(--brand)]"
+              />
+              <span>
+                Also re-price the {usage!.done} finished {usage!.done === 1 ? "chore" : "chores"}
+                <span className="block text-xs font-semibold text-muted">
+                  Balances adjust by the difference. Untick to leave past points as they were.
+                </span>
+              </span>
+            </label>
           )}
         </div>
       )}

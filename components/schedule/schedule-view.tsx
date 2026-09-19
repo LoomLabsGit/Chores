@@ -38,6 +38,7 @@ import { ChoreCard, ChoreCardView } from "./chore-card";
 import { CompleteSheet } from "./complete-sheet";
 import { EditChoreSheet } from "./edit-chore-sheet";
 import { ConfirmDialog } from "../ui/modal";
+import { RepeatDeleteSheet } from "./repeat-delete-sheet";
 
 // Pointer position decides the drop target; rect overlap is the keyboard fallback (no pointer).
 const collision: CollisionDetection = (args) => {
@@ -112,6 +113,7 @@ export function ScheduleView() {
   }
 
   const selectedList = byDate[selected] ?? [];
+  const askWhichToDelete = !!removing && !removing.is_completed && !!removing.parent_recurrence_id;
 
   /** Tapping a card: unassigned chores open the Claim sheet, everything else the completion sheet. */
   const openCard = (inst: ChoreInstance) => (inst.assigned_to === null ? setClaiming(inst) : setCompleting(inst));
@@ -254,11 +256,17 @@ export function ScheduleView() {
           setCompleting(null);
           setEditing(inst);
         }}
+        onRemove={(inst) => {
+          setCompleting(null);
+          setRemoving(inst);
+        }}
       />
       <EditChoreSheet instance={editing} onClose={() => setEditing(null)} />
       <ClaimSheet instance={claiming} onClose={() => setClaiming(null)} onCompleteNow={setCompleting} />
+      {/* A repeating chore asks "just this one" or "all"; everything else is a plain confirmation. */}
+      <RepeatDeleteSheet instance={askWhichToDelete ? removing : null} onClose={() => setRemoving(null)} />
       <ConfirmDialog
-        open={!!removing}
+        open={!!removing && !askWhichToDelete}
         title={removing?.is_completed ? "Delete completed chore?" : "Delete this chore?"}
         message={removeMessage(removing, state.completions, nameOf)}
         confirmLabel="Delete"

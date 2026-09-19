@@ -21,6 +21,7 @@ import {
   titleTaken,
 } from "@/lib/logic/library";
 import { describeRepeat, frequencyFromRule, ordinal } from "@/lib/logic/recurrence";
+import { completionShares, formatDelta, ledgerRows, repricedShares } from "@/lib/logic/ledger";
 import {
   calculateBasePoints,
   calculatePoints,
@@ -286,6 +287,7 @@ describe("stats", () => {
     user_b_id: B,
     user_b_duration: 0,
     user_b_points: 0,
+    owner_percent: 100,
     created_at: at("2026-09-18"),
     ...over,
   });
@@ -478,15 +480,23 @@ describe("manage chores helpers", () => {
     ]);
   });
 
-  it("explains what a time or tax change will touch, and reassures about finished chores", () => {
+  it("explains what a tax change will touch, including re-pricing finished chores", () => {
     expect(describePush(before, { ...before, tax: 5 }, usage)).toEqual([
       "The new tax applies to 3 unfinished chores and 1 repeating chore (every later day).",
+      "12 finished chores will be re-priced (+5 pts each) and balances adjusted to match.",
+    ]);
+    expect(describePush({ ...before, tax: 8 }, { ...before, tax: 3 }, { open: 0, done: 1, repeating: 0 })).toEqual([
+      "1 finished chore will be re-priced (\u22125 pts each) and balances adjusted to match.",
+    ]);
+  });
+
+  it("leaves finished chores alone when re-pricing is switched off, or when only the time changes", () => {
+    expect(describePush(before, { ...before, tax: 5 }, usage, false)[1]).toBe("Finished chores keep the points they earned.");
+    expect(describePush(before, { ...before, minutes: 30 }, { open: 1, done: 4, repeating: 0 })).toEqual([
+      "The new time applies to 1 unfinished chore.",
       "Finished chores keep the points they earned.",
     ]);
     expect(describePush(before, { ...before, minutes: 30, tax: 5 }, usage)[0]).toMatch(/^The new time and tax apply to /);
-    expect(describePush(before, { ...before, minutes: 30 }, { open: 1, done: 0, repeating: 0 })).toEqual([
-      "The new time applies to 1 unfinished chore.",
-    ]);
   });
 
   it("says nothing when nothing changes or nothing is planned", () => {
@@ -499,5 +509,49 @@ describe("manage chores helpers", () => {
     expect(describeUsage({ open: 3, done: 12, repeating: 1 })).toBe("3 on the calendar · 12 done · repeats");
     expect(describeUsage({ open: 0, done: 1, repeating: 0 })).toBe("1 done");
     expect(describeUsage({ open: 0, done: 0, repeating: 0 })).toBe("Not used yet");
+  });
+});
+
+describe("dynamic ledger", () => {
+  const A = "alex";
+  const B = "blake";
+
+  it("reads the shares a completion paid out", () => {
+    expect(completionShares({ user_a_id: A, user_a_points: 6, user_b_id: B, user_b_points: 4 })).toEqual({ [A]: 6, [B]: 4 });
+    // a household of one records the same person twice
+    expect(completionShares({ user_a_id: A, user_a_points: 8, user_b_id: A, user_b_points: 0 })).toEqual({ [A]: 8 });
+  });
+
+  it("re-prices from logged time and tax, splitting exactly (owner rounded, other gets the remainder)", () => {
+    // 45 min = 9 + tax 4 = 13; 60% -> 8 / 5
+    const { total, shares } = repricedShares({ minutes: 45, tax: 4, ownerPercent: 60, ownerId: A, otherId: B });
+    expect(total).toBe(13);
+    expect(shares).toEqual({ [A]: 8, [B]: 5 });
+    expect(shares[A] + shares[B]).toBe(total);
+  });
+
+  it("works out each person's difference, as the database does (30 -> 45 min at 60/40, tax 4)", () => {
+    const before = completionShares({ user_a_id: A, user_a_points: 6, user_b_id: B, user_b_points: 4 });
+    const rows = ledgerRows(before, repricedShares({ minutes: 45, tax: 4, ownerPercent: 60, ownerId: A, otherId: B }).shares);
+    expect(rows).toEqual([
+      { userId: A, before: 6, after: 8, delta: 2 },
+      { userId: B, before: 4, after: 5, delta: 1 },
+    ]);
+  });
+
+  it("handing the chore over swaps who holds the first share", () => {
+    const before = completionShares({ user_a_id: A, user_a_points: 6, user_b_id: B, user_b_points: 4 });
+    const rows = ledgerRows(before, repricedShares({ minutes: 30, tax: 4, ownerPercent: 60, ownerId: B, otherId: A }).shares);
+    expect(rows.map((r) => [r.userId, r.delta])).toEqual([[A, -2], [B, 2]]);
+  });
+
+  it("a lower tax is a debit, and a household of one mirrors the owner", () => {
+    const before = completionShares({ user_a_id: A, user_a_points: 16, user_b_id: A, user_b_points: 0 });
+    const rows = ledgerRows(before, repricedShares({ minutes: 60, tax: 0, ownerPercent: 100, ownerId: A, otherId: A }).shares);
+    expect(rows).toEqual([{ userId: A, before: 16, after: 12, delta: -4 }]);
+  });
+
+  it("formats differences with a real minus sign", () => {
+    expect([formatDelta(3), formatDelta(-2), formatDelta(0)]).toEqual(["+3", "\u22122", "0"]);
   });
 });

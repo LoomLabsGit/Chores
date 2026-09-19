@@ -158,6 +158,7 @@ export function AssigneeField({
   partner,
   tone,
   label = "Assigned to",
+  allowUnassigned = true,
 }: {
   value: string | null;
   onChange: (id: string | null) => void;
@@ -165,6 +166,8 @@ export function AssigneeField({
   partner: Profile | undefined;
   tone: (id: string) => Tone;
   label?: string;
+  /** A finished chore always belongs to someone, so its editor turns this off. */
+  allowUnassigned?: boolean;
 }) {
   const people = partner ? [me, partner] : [me];
   return (
@@ -184,12 +187,95 @@ export function AssigneeField({
               </>
             ),
           })),
-          { value: "", label: <>Unassigned</> },
+          ...(allowUnassigned ? [{ value: "", label: <>Unassigned</> }] : []),
         ]}
       />
       {value === null && (
         <p className="text-xs font-semibold text-muted">Anyone can claim it from the calendar, or just complete it.</p>
       )}
     </div>
+  );
+}
+
+/**
+ * "Split effort with partner": a switch and a slider that runs owner -> other in steps of 10%. The owner is
+ * the person the chore belongs to (their share is the first one). Off means the owner did all of it.
+ */
+export function SplitControl({
+  owner,
+  other,
+  ownerTone,
+  otherTone,
+  enabled,
+  onToggle,
+  pct,
+  onPct,
+}: {
+  owner: Profile;
+  other: Profile | undefined;
+  ownerTone: Tone;
+  otherTone: Tone;
+  enabled: boolean;
+  onToggle: () => void;
+  pct: number;
+  onPct: (pct: number) => void;
+}) {
+  return (
+    <section className="rounded-3xl border border-line p-4">
+      <div className="flex min-h-11 items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p id="split-label" className="font-extrabold">
+            Split effort with partner
+          </p>
+          {!other && <p className="text-xs text-muted">Invite your partner to split chores.</p>}
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={enabled}
+          aria-labelledby="split-label"
+          disabled={!other}
+          onClick={onToggle}
+          className={`relative h-8 w-14 shrink-0 rounded-full transition-colors disabled:opacity-40 ${enabled ? "bg-brand" : "bg-line"}`}
+        >
+          <span
+            className={`absolute left-0 top-1 h-6 w-6 rounded-full bg-white shadow transition-transform ${enabled ? "translate-x-7" : "translate-x-1"}`}
+          />
+        </button>
+      </div>
+
+      {enabled && other && (
+        <div className="mt-3 flex flex-col gap-1">
+          <div className="flex items-center gap-2">
+            <div className="flex w-12 shrink-0 flex-col items-center gap-0.5">
+              <Avatar name={owner.display_name} tone={ownerTone} size={40} />
+              <span className="max-w-full truncate text-[11px] font-bold text-muted">{owner.display_name}</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={10}
+              value={pct}
+              onChange={(e) => onPct(Number(e.target.value))}
+              aria-label={`${owner.display_name}'s share of the effort`}
+              aria-valuetext={`${owner.display_name} ${pct} percent, ${other.display_name} ${100 - pct} percent`}
+              className="split-range flex-1"
+              style={
+                {
+                  "--fill": `${pct}%`,
+                  "--left": `var(--${ownerTone})`,
+                  "--right": `var(--${otherTone})`,
+                } as React.CSSProperties
+              }
+            />
+            <div className="flex w-12 shrink-0 flex-col items-center gap-0.5">
+              <Avatar name={other.display_name} tone={otherTone} size={40} />
+              <span className="max-w-full truncate text-[11px] font-bold text-muted">{other.display_name}</span>
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
   );
 }

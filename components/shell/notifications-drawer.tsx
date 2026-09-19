@@ -17,6 +17,7 @@ const TYPE_ICON: Record<NotificationType, IconName> = {
   challenge_declined: "trophy",
   challenge_completed: "trophy",
   reward_redeemed: "gift",
+  points_adjusted: "star",
 };
 
 export function NotificationsDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {

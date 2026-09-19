@@ -157,7 +157,15 @@ export type NewChore = { title: string; minutes: number; tax: number };
 export type LibraryInput = { title: string; category: string; minutes: number; tax: number };
 
 /** How many existing chores an edit reached. */
-export type LibraryPushResult = { open: number; series: number };
+export type LibraryPushResult = {
+  open: number;
+  series: number;
+  /** Finished chores that were re-priced. */
+  done: number;
+  /** How much your balance / your partner's balance changed because of that. */
+  myDelta: number;
+  theirDelta: number;
+};
 
 /** Fields that can be changed on an unfinished chore without a special server function. */
 export type InstancePatch = Partial<
@@ -179,7 +187,15 @@ export type ChoreEdit = {
   repeat: RepeatChoice;
   /** For a repeating chore: change only this day, or this day and every later one. */
   scope: "this" | "future";
+  /**
+   * Finished chores only: the minutes actually logged and the owner's share of the effort. Changing them
+   * (or the tax, or the assignee) re-prices the chore and adjusts balances by the difference.
+   */
+  loggedMinutes?: number;
+  ownerPercent?: number;
 };
+
+export type ChallengeInput = { title: string; target: number; reward: number; assignedTo: string };
 
 export type StatsData = { completions: ChoreCompletion[]; instances: ChoreInstance[] };
 
@@ -194,19 +210,36 @@ export type Actions = {
    * Edit a library chore and push what changed to the chores already on the calendar.
    * Resolves to how many it reached, or null when it failed (the error is already shown).
    */
-  updateLibraryChore: (id: string, input: LibraryInput) => Promise<LibraryPushResult | null>;
+  updateLibraryChore: (
+    id: string,
+    input: LibraryInput,
+    opts?: { repriceFinished?: boolean },
+  ) => Promise<LibraryPushResult | null>;
   /** Delete a library chore. Resolves to how many unfinished calendar chores were removed, or null on failure. */
   deleteLibraryChore: (id: string, removeOpen: boolean) => Promise<number | null>;
   /** Usage counts per library chore id; null when it could not be read. */
   fetchLibraryUsage: () => Promise<Record<string, LibraryUsage> | null>;
   removeInstance: (id: string) => Promise<boolean>;
   editChore: (instance: ChoreInstance, edit: ChoreEdit) => Promise<boolean>;
+  /** How many unfinished days a repeating chore still has (including this one); null if unknown. */
+  countOpenInSeries: (instance: ChoreInstance) => Promise<number | null>;
+  /** "Delete all": every unfinished day of a repeating chore, and it stops repeating. Resolves to how many went. */
+  removeSeries: (instance: ChoreInstance) => Promise<number | null>;
   /** Undo a completion: takes the points back and returns the chore to unfinished. */
   uncompleteChore: (instance: ChoreInstance) => Promise<boolean>;
   /** `ownerPercent` is the share of the chore's owner (its assignee, or you if it is unassigned). */
   completeChore: (instance: ChoreInstance, minutes: number, ownerPercent: number) => Promise<boolean>;
   createChallenge: (input: { title: string; assignedTo: string; target: number; reward: number }) => Promise<boolean>;
   respondToChallenge: (id: string, accept: boolean) => Promise<boolean>;
+  /**
+   * Set a challenge's progress: the - and + on its card. Lowering a completed challenge reopens it and takes
+   * the reward back; reaching the target completes it and pays. Resolves to the updated challenge, or null.
+   */
+  setChallengeProgress: (id: string, count: number) => Promise<Challenge | null>;
+  /** Edit a challenge (name, target, reward, who it is for). Payouts follow for a completed one. */
+  updateChallenge: (id: string, input: ChallengeInput) => Promise<Challenge | null>;
+  /** Delete a challenge. Resolves to the points taken back (0 unless it was completed), or null. */
+  deleteChallenge: (id: string) => Promise<number | null>;
   /** Resolves to "completed" when this tap finished the challenge. */
   incrementChallenge: (id: string) => Promise<"ok" | "completed" | "failed">;
   redeemReward: (id: string) => Promise<boolean>;
@@ -452,6 +485,11 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
     };
     /** Roll back by re-reading server truth (used where a manual revert would be fiddly). */
     const resync = () => void reload();
+    /** Re-read both balances (after an action that pays out or takes points back on the server). */
+    const refreshMembers = async () => {
+      const { data } = await supabase.from("profiles").select("*");
+      for (const row of (data ?? []) as Profile[]) dispatch({ type: "upsert", key: "members", row });
+    };
 
     const householdIdNow = () => stateRef.current.household!.id;
 
@@ -576,7 +614,7 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
         return true;
       },
 
-      async updateLibraryChore(id, input) {
+      async updateLibraryChore(id, input, opts) {
         const prev = stateRef.current.library.find((c) => c.id === id);
         if (!prev) return null;
         const { data, error } = await supabase.rpc("update_library_chore", {
@@ -585,6 +623,7 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           p_category: input.category,
           p_duration: input.minutes,
           p_tax: input.tax,
+          p_reprice_finished: opts?.repriceFinished ?? true,
         });
         if (error) {
           fail(error);
@@ -601,11 +640,23 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
             chore_tax: input.tax,
           },
         });
-        // The server rewrote calendar chores too: re-read the visible week rather than guess which.
-        const range = rangeRef.current;
-        if (range) await loadWeek(range.from, range.to);
-        const row = (data as { n_open: number; n_series: number }[] | null)?.[0];
-        return { open: row?.n_open ?? 0, series: row?.n_series ?? 0 };
+        const row = (
+          data as { n_open: number; n_series: number; n_done: number; my_delta: number; their_delta: number }[] | null
+        )?.[0];
+        // The server rewrote calendar chores too (and balances, if finished ones were re-priced): re-read
+        // rather than guess which.
+        if (row?.n_done) await reload();
+        else {
+          const range = rangeRef.current;
+          if (range) await loadWeek(range.from, range.to);
+        }
+        return {
+          open: row?.n_open ?? 0,
+          series: row?.n_series ?? 0,
+          done: row?.n_done ?? 0,
+          myDelta: row?.my_delta ?? 0,
+          theirDelta: row?.their_delta ?? 0,
+        };
       },
 
       async deleteLibraryChore(id, removeOpen) {
@@ -673,6 +724,33 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
         return true;
       },
 
+      async countOpenInSeries(instance) {
+        if (!instance.parent_recurrence_id) return null;
+        // Days are generated a few months ahead, so a series is small: count the rows rather than ask for a total.
+        const { data, error } = await supabase
+          .from("chore_instances")
+          .select("id")
+          .eq("parent_recurrence_id", instance.parent_recurrence_id)
+          .eq("is_completed", false);
+        return error ? null : (data?.length ?? null);
+      },
+
+      async removeSeries(instance) {
+        const seriesId = instance.parent_recurrence_id;
+        if (!seriesId) return null;
+        const { data, error } = await supabase.rpc("remove_chore_series", { p_instance_id: instance.id });
+        if (error) {
+          fail(error);
+          return null;
+        }
+        for (const inst of Object.values(stateRef.current.instances)) {
+          if (inst.parent_recurrence_id === seriesId && !inst.is_completed) dispatch({ type: "instance-remove", id: inst.id });
+        }
+        const range = rangeRef.current;
+        if (range) await loadWeek(range.from, range.to);
+        return (data as number | null) ?? 0;
+      },
+
       async uncompleteChore(instance) {
         const prev = stateRef.current.instances[instance.id];
         if (!prev || !prev.is_completed) return false;
@@ -703,18 +781,24 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
         if (!title) return false;
 
         if (prev.is_completed) {
-          // Finished chores: name, day and assignee only. Points and logged time stay as paid out.
+          // Finished chores: name and day, plus the dynamic ledger. Changing the logged time, tax, split or who
+          // it is for re-prices the chore on the server and adjusts each balance by the difference.
           dispatch({ type: "instance", row: { ...prev, title, assigned_to: edit.assignedTo, scheduled_date: edit.date } });
-          const { error } = await supabase.rpc("edit_completed_chore", {
+          const { data, error } = await supabase.rpc("edit_completed_chore", {
             p_instance_id: prev.id,
             p_title: title,
             p_assigned_to: edit.assignedTo,
             p_scheduled_date: edit.date,
+            p_total_minutes: edit.loggedMinutes ?? null,
+            p_tax: edit.tax,
+            p_owner_percent: edit.ownerPercent ?? null,
           });
           if (error) {
             dispatch({ type: "instance", row: prev });
             return fail(error);
           }
+          // A non-empty result means points moved: re-read the completion and both balances.
+          if (Array.isArray(data) && data.length > 0) await reload();
           return true;
         }
 
@@ -780,6 +864,7 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           user_b_id: otherId ?? ownerId,
           user_b_duration: split.b.minutes,
           user_b_points: split.b.points,
+          owner_percent: ownerPercent,
           created_at: now,
         };
         dispatch({
@@ -857,6 +942,54 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
         const row = data as Challenge;
         dispatch({ type: "upsert", key: "challenges", row });
         return row.status === "completed" ? "completed" : "ok";
+      },
+
+      async setChallengeProgress(id, count) {
+        const prev = stateRef.current.challenges.find((c) => c.id === id);
+        // A plain step down on a running challenge cannot pay or take back anything, so show it at once.
+        // Reopening or completing moves points and waits for the server.
+        if (prev && prev.status === "active" && count >= 0 && count < prev.target_count) {
+          dispatch({ type: "upsert", key: "challenges", row: { ...prev, current_count: count } });
+        }
+        const { data, error } = await supabase.rpc("set_challenge_progress", { p_challenge_id: id, p_count: count });
+        if (error) {
+          if (prev) dispatch({ type: "upsert", key: "challenges", row: prev });
+          fail(error);
+          return null;
+        }
+        const row = data as Challenge;
+        dispatch({ type: "upsert", key: "challenges", row });
+        await refreshMembers(); // finishing pays out; reopening takes the reward back
+        return row;
+      },
+
+      async updateChallenge(id, input) {
+        const { data, error } = await supabase.rpc("update_challenge", {
+          p_challenge_id: id,
+          p_title: input.title,
+          p_target_count: input.target,
+          p_reward_points: input.reward,
+          p_assigned_to: input.assignedTo,
+        });
+        if (error) {
+          fail(error);
+          return null;
+        }
+        const row = data as Challenge;
+        dispatch({ type: "upsert", key: "challenges", row });
+        await refreshMembers(); // a completed challenge's payout may have moved
+        return row;
+      },
+
+      async deleteChallenge(id) {
+        const { data, error } = await supabase.rpc("delete_challenge", { p_challenge_id: id });
+        if (error) {
+          fail(error);
+          return null;
+        }
+        dispatch({ type: "remove", key: "challenges", id });
+        await refreshMembers();
+        return (data as number | null) ?? 0;
       },
 
       async redeemReward(id) {

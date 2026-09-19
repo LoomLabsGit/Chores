@@ -55,7 +55,7 @@ function DateForm({
     if (unchanged) return onClose();
     setBusy(true);
     const ok = instance.is_completed
-      ? // Finished chores go through the server function that leaves points and time untouched.
+      ? // Finished chores go through the server function. Only the day changes here, so nothing is re-priced.
         await actions.editChore(instance, {
           title: instance.title,
           minutes: instance.estimated_duration,

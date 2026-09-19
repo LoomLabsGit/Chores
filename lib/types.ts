@@ -61,6 +61,8 @@ export type ChoreCompletion = {
   user_b_id: string;
   user_b_duration: number;
   user_b_points: number;
+  /** The owner's (user A's) share of the effort, 0-100. Lets the completion be re-priced exactly. */
+  owner_percent: number;
   created_at: string;
 };
 
@@ -105,7 +107,8 @@ export type NotificationType =
   | "challenge_accepted"
   | "challenge_declined"
   | "challenge_completed"
-  | "reward_redeemed";
+  | "reward_redeemed"
+  | "points_adjusted";
 
 export type AppNotification = {
   id: string;
