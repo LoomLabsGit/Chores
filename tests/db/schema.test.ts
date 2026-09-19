@@ -54,6 +54,7 @@ beforeAll(async () => {
   await db.exec(read("supabase/migrations/0001_init.sql"));
   await db.exec(read("supabase/migrations/0002_remove_completed_chore.sql"));
   await db.exec(read("supabase/migrations/0003_recurring_chores.sql"));
+  await db.exec(read("supabase/migrations/0004_uncheck_chore.sql"));
   for (const id of [ALEX, BLAKE, CASEY, DREW]) {
     await admin(`insert into auth.users (id, email) values ($1, $2)`, [id, `${id}@example.com`]);
   }
@@ -585,5 +586,59 @@ describe("recurring chores", () => {
     expect(await as(ALEX, `update public.chore_instances set points_assigned = 9 where id = $1 returning points_assigned`, [id])).toEqual([{ points_assigned: 9 }]);
     await expect(as(ALEX, `update public.chore_instances set is_completed = true where id = $1`, [id])).rejects.toThrow(/permission denied/);
     await expect(as(ALEX, `update public.chore_instances set points_assigned = 99 where id = $1`, [id])).rejects.toThrow(/check constraint/);
+  });
+});
+
+describe("uncomplete_chore (uncheck)", () => {
+  const points = async (uid: string) =>
+    (await as(uid, `select points from public.profiles where id = $1`, [uid]))[0].points as number;
+  const admin1 = async (sql: string, params: unknown[]) => (await admin(sql, params)).length;
+
+  it("takes back both partners' points and returns the chore to unfinished", async () => {
+    const [a0, b0] = [await points(ALEX), await points(BLAKE)];
+    const id = await chore(ALEX, "Uncheck me", 10);
+    await as(ALEX, `select * from public.complete_chore($1, 30, 60)`, [id]); // Alex +6, Blake +4
+    expect(await admin1(`select 1 from public.notifications where message like '%Uncheck me%'`, [])).toBeGreaterThan(0);
+
+    await as(ALEX, `select public.uncomplete_chore($1)`, [id]);
+
+    expect(await points(ALEX)).toBe(a0);
+    expect(await points(BLAKE)).toBe(b0);
+    const [inst] = await admin(`select is_completed, completed_at from public.chore_instances where id = $1`, [id]);
+    expect(inst).toEqual({ is_completed: false, completed_at: null });
+    expect(await admin1(`select 1 from public.chore_completions where instance_id = $1`, [id])).toBe(0);
+    expect(await admin1(`select 1 from public.notifications where message like '%Uncheck me%' and type = 'chore_completed'`, [])).toBe(0);
+  });
+
+  it("the chore is fully usable again: editable, movable and completable with a different split", async () => {
+    const [a0, b0] = [await points(ALEX), await points(BLAKE)];
+    const id = await chore(ALEX, "Redo me", 10);
+    await as(ALEX, `select * from public.complete_chore($1, 30, 100)`, [id]); // Alex +10
+    await as(BLAKE, `select public.uncomplete_chore($1)`, [id]); // either partner may uncheck
+    expect(await points(ALEX)).toBe(a0);
+
+    expect(await as(ALEX, `update public.chore_instances set title = 'Redone', points_assigned = 8 where id = $1 returning id`, [id])).toHaveLength(1);
+    await as(ALEX, `select * from public.complete_chore($1, 20, 50)`, [id]); // 8 pts at 50/50 -> 4 + 4
+    expect(await points(ALEX)).toBe(a0 + 4);
+    expect(await points(BLAKE)).toBe(b0 + 4);
+    expect(await admin1(`select 1 from public.chore_completions where instance_id = $1`, [id])).toBe(1);
+  });
+
+  it("floors a balance at zero if the points were already spent", async () => {
+    const id = await chore(ALEX, "Spent already", 8);
+    await as(ALEX, `select * from public.complete_chore($1, 10, 100)`, [id]);
+    await admin(`update public.profiles set points = 1 where id = $1`, [ALEX]);
+    await as(ALEX, `select public.uncomplete_chore($1)`, [id]);
+    expect(await points(ALEX)).toBe(0);
+  });
+
+  it("rejects unfinished chores, other households and signed-out callers", async () => {
+    const open = await chore(ALEX, "Still open", 3);
+    await expect(as(ALEX, `select public.uncomplete_chore($1)`, [open])).rejects.toThrow(/not completed/);
+    const done = await chore(ALEX, "Not yours", 3);
+    await as(ALEX, `select * from public.complete_chore($1, 5, 100)`, [done]);
+    await expect(as(DREW, `select public.uncomplete_chore($1)`, [done])).rejects.toThrow(/not found/i);
+    await expect(asAnon(`select public.uncomplete_chore($1)`, [done])).rejects.toThrow(/permission denied/);
+    expect((await admin(`select is_completed from public.chore_instances where id = $1`, [done]))[0].is_completed).toBe(true);
   });
 });

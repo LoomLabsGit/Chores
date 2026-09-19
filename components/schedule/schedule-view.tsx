@@ -31,6 +31,7 @@ import { Icon } from "../icons";
 import { useToast } from "../toast";
 import { Avatar, EmptyState, TONE_SOFT } from "../ui/controls";
 import { AddChoreSheet } from "./add-chore-sheet";
+import { CardActions } from "./card-menu";
 import { ChoreCard, ChoreCardView } from "./chore-card";
 import { CompleteSheet } from "./complete-sheet";
 import { EditChoreSheet } from "./edit-chore-sheet";
@@ -107,6 +108,17 @@ export function ScheduleView() {
 
   const selectedList = byDate[selected] ?? [];
 
+  const cardActions: CardActions = {
+    onEdit: setEditing,
+    onDelete: setRemoving,
+    onUncheck: (inst) => {
+      const takenBack = pointsTakenBack(state.completions[inst.id], nameOf);
+      void actions.uncompleteChore(inst).then(
+        (ok) => ok && toast(`Unchecked ${inst.title}${takenBack.length ? `. Points taken back (${takenBack.join(", ")})` : ""}`),
+      );
+    },
+  };
+
   return (
     <DndContext
       sensors={sensors}
@@ -135,7 +147,7 @@ export function ScheduleView() {
                 instances={byDate[d]}
                 onSelect={() => setSelected(d)}
                 onOpen={setCompleting}
-                onRemove={setRemoving}
+                actions={cardActions}
               />
             ))}
           </div>
@@ -171,7 +183,7 @@ export function ScheduleView() {
                 </EmptyState>
               ) : (
                 selectedList.map((inst) => (
-                  <ChoreCard key={inst.id} instance={inst} overdue={inst.scheduled_date < today} onOpen={setCompleting} onRemove={setRemoving} />
+                  <ChoreCard key={inst.id} instance={inst} overdue={inst.scheduled_date < today} onOpen={setCompleting} actions={cardActions} />
                 ))
               )}
             </section>
@@ -212,15 +224,15 @@ export function ScheduleView() {
       <EditChoreSheet instance={editing} onClose={() => setEditing(null)} />
       <ConfirmDialog
         open={!!removing}
-        title="Remove completed chore?"
+        title={removing?.is_completed ? "Delete completed chore?" : "Delete this chore?"}
         message={removeMessage(removing, state.completions, nameOf)}
-        confirmLabel="Remove"
+        confirmLabel="Delete"
         danger
         onCancel={() => setRemoving(null)}
         onConfirm={() => {
           const inst = removing;
           setRemoving(null);
-          if (inst) void actions.removeInstance(inst.id).then((ok) => ok && toast(`Removed ${inst.title}`));
+          if (inst) void actions.removeInstance(inst.id).then((ok) => ok && toast(`Deleted ${inst.title}`));
         }}
       />
     </DndContext>
@@ -330,7 +342,7 @@ function DayColumn({
   instances,
   onSelect,
   onOpen,
-  onRemove,
+  actions,
 }: {
   date: string;
   today: string;
@@ -338,7 +350,7 @@ function DayColumn({
   instances: ChoreInstance[];
   onSelect: () => void;
   onOpen: (i: ChoreInstance) => void;
-  onRemove: (i: ChoreInstance) => void;
+  actions: CardActions;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: `day:${date}` });
   const isToday = date === today;
@@ -365,7 +377,7 @@ function DayColumn({
         <p className="px-2 pt-4 text-center text-xs font-semibold text-muted">Free day</p>
       ) : (
         instances.map((inst) => (
-          <ChoreCard key={inst.id} instance={inst} overdue={inst.scheduled_date < today} onOpen={onOpen} onRemove={onRemove} compact />
+          <ChoreCard key={inst.id} instance={inst} overdue={inst.scheduled_date < today} onOpen={onOpen} actions={actions} compact />
         ))
       )}
     </section>
@@ -408,22 +420,25 @@ function AssignZone({ id, name, tone, current }: { id: string; name: string; ton
   );
 }
 
-/** Spells out exactly whose points will be taken back before the user confirms. */
+/** "Alex −3", "Blake −4": whose points a removal or uncheck takes back. */
+function pointsTakenBack(c: ChoreCompletion | undefined, nameOf: (id: string | null) => string): string[] {
+  if (!c) return [];
+  const shares: [string, number][] = [[c.user_a_id, c.user_a_points]];
+  if (c.user_b_id !== c.user_a_id) shares.push([c.user_b_id, c.user_b_points]);
+  return shares.filter(([, pts]) => pts > 0).map(([id, pts]) => `${nameOf(id)} \u2212${pts}`);
+}
+
+/** Spells out the consequence before the user confirms a delete. */
 function removeMessage(
   inst: ChoreInstance | null,
   completions: Record<string, ChoreCompletion>,
   nameOf: (id: string | null) => string,
 ): string {
   if (!inst) return "";
-  const c = completions[inst.id];
-  const takeBack = c
-    ? [
-        [c.user_a_id, c.user_a_points],
-        ...(c.user_b_id !== c.user_a_id ? [[c.user_b_id, c.user_b_points]] : []),
-      ]
-        .filter(([, pts]) => (pts as number) > 0)
-        .map(([id, pts]) => `${nameOf(id as string)} \u2212${pts}`)
-    : [];
+  if (!inst.is_completed) {
+    return `"${inst.title}" will be removed from ${formatLongDay(inst.scheduled_date)} only. Any other days stay as they are.`;
+  }
+  const takeBack = pointsTakenBack(completions[inst.id], nameOf);
   return takeBack.length
     ? `"${inst.title}" will be deleted and its points taken back (${takeBack.join(", ")}). It will also disappear from Stats.`
     : `"${inst.title}" will be deleted. It will also disappear from Stats.`;

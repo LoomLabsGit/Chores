@@ -172,6 +172,8 @@ export type Actions = {
   archiveChore: (id: string) => Promise<boolean>;
   removeInstance: (id: string) => Promise<boolean>;
   editChore: (instance: ChoreInstance, edit: ChoreEdit) => Promise<boolean>;
+  /** Undo a completion: takes the points back and returns the chore to unfinished. */
+  uncompleteChore: (instance: ChoreInstance) => Promise<boolean>;
   completeChore: (instance: ChoreInstance, minutes: number, myPercent: number) => Promise<boolean>;
   createChallenge: (input: { title: string; assignedTo: string; target: number; reward: number }) => Promise<boolean>;
   respondToChallenge: (id: string, accept: boolean) => Promise<boolean>;
@@ -347,7 +349,11 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
       if (key === "instances") {
         const inst = row as unknown as ChoreInstance;
         dispatch({ type: "instance", row: inst });
-        if (inst.is_completed && !stateRef.current.completions[inst.id]) void fetchCompletion(inst.id);
+        const known = stateRef.current.completions[inst.id];
+        // Unchecked on the other device: drop the stale completion. Completed (again): re-read it,
+        // because a cached completion from an earlier round may be out of date.
+        if (!inst.is_completed && known) dispatch({ type: "completion-remove", instanceId: inst.id });
+        else if (inst.is_completed && known?.created_at !== inst.completed_at) void fetchCompletion(inst.id);
         return;
       }
       // The realtime payload is untyped; `key` and `row` always pair up by table.
@@ -548,6 +554,29 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
         if (error || !data?.length) {
           dispatch({ type: "instance", row: prev });
           return fail(error ?? { message: "That chore can no longer be removed." });
+        }
+        return true;
+      },
+
+      async uncompleteChore(instance) {
+        const prev = stateRef.current.instances[instance.id];
+        if (!prev || !prev.is_completed) return false;
+        const completion = stateRef.current.completions[prev.id];
+
+        dispatch({ type: "instance", row: { ...prev, is_completed: false, completed_at: null } });
+        if (completion) {
+          dispatch({ type: "completion-remove", instanceId: prev.id });
+          dispatch({ type: "points", userId: completion.user_a_id, delta: -completion.user_a_points });
+          if (completion.user_b_id !== completion.user_a_id) {
+            dispatch({ type: "points", userId: completion.user_b_id, delta: -completion.user_b_points });
+          }
+        }
+        const { error } = await supabase.rpc("uncomplete_chore", { p_instance_id: prev.id });
+        if (error) {
+          dispatch({ type: "instance", row: prev });
+          if (completion) dispatch({ type: "completion", row: completion });
+          resync();
+          return fail(error);
         }
         return true;
       },

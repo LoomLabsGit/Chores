@@ -6,6 +6,7 @@ import { useHousehold } from "@/lib/store/household-store";
 import type { ChoreInstance } from "@/lib/types";
 import { Icon } from "../icons";
 import { Avatar } from "../ui/controls";
+import { CardMenu, type CardActions } from "./card-menu";
 
 type Props = {
   instance: ChoreInstance;
@@ -13,29 +14,19 @@ type Props = {
   onOpen: (i: ChoreInstance) => void;
   /** Narrow vertical layout for the seven-column desktop board. */
   compact?: boolean;
-  /** Shown as a trash button on completed cards. */
-  onRemove?: (i: ChoreInstance) => void;
+  /** Powers the "..." menu (Edit / Uncheck / Delete). Omitted on the floating drag preview. */
+  actions?: CardActions;
 };
 
 /** Draggable card. The 44px grip is the only drag activator, so the rest of the card scrolls and taps normally on touch. */
-export function ChoreCard({ instance, overdue, onOpen, compact, onRemove }: Props) {
+export function ChoreCard({ instance, overdue, onOpen, compact, actions }: Props) {
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, isDragging } = useDraggable({
     id: instance.id,
     disabled: instance.is_completed,
   });
 
   const handle = instance.is_completed ? (
-    onRemove ? (
-      <button
-        onClick={() => onRemove(instance)}
-        aria-label={`Remove completed chore ${instance.title}`}
-        className="flex h-11 w-9 shrink-0 items-center justify-center rounded-xl text-muted hover:bg-danger-soft hover:text-danger"
-      >
-        <Icon name="trash" size={18} />
-      </button>
-    ) : (
-      <span aria-hidden className="h-11 w-2 shrink-0" />
-    )
+    <span aria-hidden className="h-11 w-2 shrink-0" />
   ) : (
     <button
       ref={setActivatorNodeRef}
@@ -50,7 +41,14 @@ export function ChoreCard({ instance, overdue, onOpen, compact, onRemove }: Prop
 
   return (
     <div ref={setNodeRef} className={isDragging ? "opacity-30" : undefined}>
-      <ChoreCardView instance={instance} overdue={overdue} onOpen={onOpen} handle={handle} compact={compact} />
+      <ChoreCardView
+        instance={instance}
+        overdue={overdue}
+        onOpen={onOpen}
+        handle={handle}
+        compact={compact}
+        menu={actions ? <CardMenu instance={instance} actions={actions} /> : undefined}
+      />
     </div>
   );
 }
@@ -60,9 +58,10 @@ export function ChoreCardView({
   overdue,
   onOpen,
   handle,
+  menu,
   floating,
   compact,
-}: Props & { handle?: React.ReactNode; floating?: boolean }) {
+}: Omit<Props, "actions"> & { handle?: React.ReactNode; menu?: React.ReactNode; floating?: boolean }) {
   const { state, tone, nameOf } = useHousehold();
   const completion = state.completions[instance.id];
   const done = instance.is_completed;
@@ -168,13 +167,17 @@ export function ChoreCardView({
           {openButton}
           <div className="flex items-center justify-between px-0.5 pb-0.5">
             {handle}
-            {check}
+            <div className="flex items-center">
+              {menu}
+              {check}
+            </div>
           </div>
         </>
       ) : (
         <>
           {handle}
           {openButton}
+          {menu}
           {check}
         </>
       )}
