@@ -6,7 +6,8 @@ Next.js (App Router) + Tailwind on Vercel, Supabase for Postgres, Auth and Realt
 ## Setup
 
 1. **Supabase project.** Create one, then apply the schema: paste each file in `supabase/migrations/` into the SQL editor,
-   **in order** (`0001_init.sql`, then `0002_remove_completed_chore.sql`), or use `supabase link` + `supabase db push`.
+   **in order** (`0001_init.sql`, `0002_remove_completed_chore.sql`, then `0003_recurring_chores.sql`), or use
+   `supabase link` + `supabase db push`.
    Pushing code to GitHub never changes the database, so run any new migration file by hand.
 2. **Auth.** Email + password. If "Confirm email" is on, add `https://YOUR-DOMAIN/auth/callback` (and
    `http://localhost:3000/auth/callback`) under Authentication → URL Configuration.
@@ -49,5 +50,7 @@ admin). The second signs up and chooses **Join partner** with the invite code fr
 - **"Profile switcher"** is a profile menu (members, invite code, sign out): each partner signs in on their own device, so
   there is nothing to switch between.
 - **Common tasks** are matched by title against the six base chores; **Recent** is the five most recently scheduled.
-- **Not built:** UI for creating recurring chores. The columns exist and editing/deleting only ever touches one day, but the
-  roadmap has no recurrence-generation step, so nothing creates them yet.
+- **Recurring chores** are created from **Edit chore** (every day / week / 2 weeks / month), not from the Add Chore sheet.
+  A repeating chore is a series: occurrences are created lazily as you browse forward (`extend_recurring_chores`), so it
+  runs indefinitely. Editing, completing, moving or removing one day never touches the others; "This and future" applies a
+  change to every later unfinished day. A day you removed stays removed. Repeats that start in the past are not back-filled.

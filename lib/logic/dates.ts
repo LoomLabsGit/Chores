@@ -79,3 +79,5 @@ export function timeAgo(ts: string, now: number = Date.now()): string {
   const d = new Date(ts);
   return `${d.getDate()} ${monthShort(d)}`;
 }
+
+export const weekdayLong = (iso: string) => WEEKDAYS[parseISODate(iso).getDay()];

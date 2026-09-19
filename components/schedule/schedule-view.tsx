@@ -33,6 +33,7 @@ import { Avatar, EmptyState, TONE_SOFT } from "../ui/controls";
 import { AddChoreSheet } from "./add-chore-sheet";
 import { ChoreCard, ChoreCardView } from "./chore-card";
 import { CompleteSheet } from "./complete-sheet";
+import { EditChoreSheet } from "./edit-chore-sheet";
 import { ConfirmDialog } from "../ui/modal";
 
 // Pointer position decides the drop target; rect overlap is the keyboard fallback (no pointer).
@@ -52,6 +53,7 @@ export function ScheduleView() {
   const [addOpen, setAddOpen] = useState(false);
   const [completing, setCompleting] = useState<ChoreInstance | null>(null);
   const [removing, setRemoving] = useState<ChoreInstance | null>(null);
+  const [editing, setEditing] = useState<ChoreInstance | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
 
   const days = useMemo(() => weekDays(weekStart), [weekStart]);
@@ -199,7 +201,15 @@ export function ScheduleView() {
       </button>
 
       <AddChoreSheet open={addOpen} date={selected} onClose={() => setAddOpen(false)} />
-      <CompleteSheet instance={completing} onClose={() => setCompleting(null)} />
+      <CompleteSheet
+        instance={completing}
+        onClose={() => setCompleting(null)}
+        onEdit={(inst) => {
+          setCompleting(null);
+          setEditing(inst);
+        }}
+      />
+      <EditChoreSheet instance={editing} onClose={() => setEditing(null)} />
       <ConfirmDialog
         open={!!removing}
         title="Remove completed chore?"

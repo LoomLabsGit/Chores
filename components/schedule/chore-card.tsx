@@ -112,6 +112,11 @@ export function ChoreCardView({
             <Icon name="star" size={11} />
             {instance.points_assigned}
           </span>
+          {instance.is_recurring && (
+            <span className="flex items-center" role="img" aria-label="Repeats" title="Repeats">
+              <Icon name="repeat" size={12} />
+            </span>
+          )}
           {overdue && <span className="rounded-full bg-warn-soft px-1.5 py-0.5 text-warn">Overdue</span>}
         </>
       )}

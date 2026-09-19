@@ -15,7 +15,8 @@ import { useToast } from "@/components/toast";
 import { friendlyError } from "@/lib/errors";
 import { getSupabase } from "@/lib/supabase/client";
 import { computeSplit } from "@/lib/logic/split";
-import { parseISODate } from "@/lib/logic/dates";
+import { addDays, parseISODate } from "@/lib/logic/dates";
+import type { RepeatChoice } from "@/lib/logic/recurrence";
 import { uuid } from "@/lib/uuid";
 import type {
   AppNotification,
@@ -151,6 +152,16 @@ function reducer(state: State, action: Action): State {
 
 export type NewChore = { title: string; points: number; minutes: number };
 
+export type ChoreEdit = {
+  title: string;
+  points: number;
+  assignedTo: string | null;
+  date: string;
+  repeat: RepeatChoice;
+  /** For a repeating chore: change only this day, or this day and every later one. */
+  scope: "this" | "future";
+};
+
 export type StatsData = { completions: ChoreCompletion[]; instances: ChoreInstance[] };
 
 export type Actions = {
@@ -160,6 +171,7 @@ export type Actions = {
   createAndScheduleChore: (chore: NewChore, date: string, assignedTo: string) => Promise<boolean>;
   archiveChore: (id: string) => Promise<boolean>;
   removeInstance: (id: string) => Promise<boolean>;
+  editChore: (instance: ChoreInstance, edit: ChoreEdit) => Promise<boolean>;
   completeChore: (instance: ChoreInstance, minutes: number, myPercent: number) => Promise<boolean>;
   createChallenge: (input: { title: string; assignedTo: string; target: number; reward: number }) => Promise<boolean>;
   respondToChallenge: (id: string, accept: boolean) => Promise<boolean>;
@@ -225,10 +237,21 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
 
   const rangeRef = useRef<{ from: string; to: string } | null>(null);
   const pendingInsertsRef = useRef(new Set<string>());
+  /** Repeating chores have been topped up as far as this date (this session). */
+  const extendedThroughRef = useRef<string | null>(null);
 
   const loadWeek = useCallback(
     async (from: string, to: string) => {
       rangeRef.current = { from, to };
+
+      // Repeating chores are created lazily: top them up a month past the week being viewed.
+      // Errors are ignored on purpose (e.g. the migration has not been applied yet).
+      const target = addDays(to, 28);
+      if (!extendedThroughRef.current || target > extendedThroughRef.current) {
+        const { error: extendError } = await supabase.rpc("extend_recurring_chores", { p_until: target });
+        if (!extendError) extendedThroughRef.current = target;
+      }
+
       const { data, error } = await supabase
         .from("chore_instances")
         .select("*")
@@ -526,6 +549,51 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           dispatch({ type: "instance", row: prev });
           return fail(error ?? { message: "That chore can no longer be removed." });
         }
+        return true;
+      },
+
+      async editChore(instance, edit) {
+        const prev = stateRef.current.instances[instance.id];
+        if (!prev || prev.is_completed) return false;
+        const title = edit.title.trim();
+        if (!title) return false;
+        const inSeries = !!prev.parent_recurrence_id;
+
+        const patch = {
+          title,
+          points_assigned: edit.points,
+          assigned_to: edit.assignedTo,
+          scheduled_date: edit.date,
+        };
+        dispatch({ type: "instance", row: { ...prev, ...patch } });
+        const { data, error } = await supabase.from("chore_instances").update(patch).eq("id", prev.id).select("id");
+        if (error || !data?.length) {
+          dispatch({ type: "instance", row: prev });
+          return fail(error ?? { message: "That chore can no longer be changed." });
+        }
+
+        let rpcError: { message?: string } | null = null;
+        if (inSeries && edit.scope === "future") {
+          ({ error: rpcError } = await supabase.rpc("update_chore_series", {
+            p_instance_id: prev.id,
+            p_title: title,
+            p_points: edit.points,
+            p_assigned_to: edit.assignedTo,
+            p_frequency: edit.repeat,
+          }));
+        } else if (!inSeries && edit.repeat !== "none") {
+          ({ error: rpcError } = await supabase.rpc("make_chore_recurring", {
+            p_instance_id: prev.id,
+            p_frequency: edit.repeat,
+          }));
+        } else {
+          return true;
+        }
+
+        // Occurrences were created or removed on the server: re-read the visible week.
+        const range = rangeRef.current;
+        if (range) await loadWeek(range.from, range.to);
+        if (rpcError) return fail(rpcError);
         return true;
       },
 

@@ -10,15 +10,31 @@ import { useToast } from "../toast";
 import { Avatar, fieldClass, primaryButton } from "../ui/controls";
 import { ConfirmDialog, Modal } from "../ui/modal";
 
-export function CompleteSheet({ instance, onClose }: { instance: ChoreInstance | null; onClose: () => void }) {
+export function CompleteSheet({
+  instance,
+  onClose,
+  onEdit,
+}: {
+  instance: ChoreInstance | null;
+  onClose: () => void;
+  onEdit: (i: ChoreInstance) => void;
+}) {
   return (
     <Modal open={!!instance} onClose={onClose} title={instance?.title ?? "Complete chore"} variant="sheet">
-      {instance && <CompleteForm key={instance.id} instance={instance} onClose={onClose} />}
+      {instance && <CompleteForm key={instance.id} instance={instance} onClose={onClose} onEdit={onEdit} />}
     </Modal>
   );
 }
 
-function CompleteForm({ instance, onClose }: { instance: ChoreInstance; onClose: () => void }) {
+function CompleteForm({
+  instance,
+  onClose,
+  onEdit,
+}: {
+  instance: ChoreInstance;
+  onClose: () => void;
+  onEdit: (i: ChoreInstance) => void;
+}) {
   const { me, partner, state, tone, nameOf, actions } = useHousehold();
   const { toast } = useToast();
 
@@ -178,12 +194,21 @@ function CompleteForm({ instance, onClose }: { instance: ChoreInstance; onClose:
           Complete
           {!split && <span className="opacity-80">· +{instance.points_assigned} pts</span>}
         </button>
-        <button
-          onClick={() => setConfirmRemove(true)}
-          className="min-h-11 rounded-2xl text-sm font-bold text-danger hover:bg-danger-soft"
-        >
-          Remove from schedule
-        </button>
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            onClick={() => onEdit(instance)}
+            className="flex min-h-11 items-center justify-center gap-1.5 rounded-2xl text-sm font-bold hover:bg-raised"
+          >
+            <Icon name="pencil" size={16} />
+            Edit chore
+          </button>
+          <button
+            onClick={() => setConfirmRemove(true)}
+            className="min-h-11 rounded-2xl text-sm font-bold text-danger hover:bg-danger-soft"
+          >
+            Remove
+          </button>
+        </div>
       </div>
 
       <ConfirmDialog

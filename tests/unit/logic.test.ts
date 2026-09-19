@@ -11,6 +11,7 @@ import {
   weekDays,
 } from "@/lib/logic/dates";
 import { allChoresAlphabetical, commonChores, recentChores } from "@/lib/logic/library";
+import { describeRepeat, frequencyFromRule, ordinal } from "@/lib/logic/recurrence";
 import { clampMinutes, computeSplit, formatMinutes, share } from "@/lib/logic/split";
 import { computeStats, timeframeStart } from "@/lib/logic/stats";
 import type {
@@ -344,5 +345,31 @@ describe("stats", () => {
     expect(timeframeStart("week", "2026-09-18")).toBe("2026-09-12");
     expect(timeframeStart("month", "2026-09-18")).toBe("2026-08-20");
     expect(timeframeStart("1y", "2026-09-18")).toBe("2025-09-19");
+  });
+});
+
+describe("recurrence helpers", () => {
+  it("reads the stored rule text", () => {
+    expect(frequencyFromRule("FREQ=DAILY")).toBe("daily");
+    expect(frequencyFromRule("FREQ=WEEKLY")).toBe("weekly");
+    expect(frequencyFromRule("FREQ=WEEKLY;INTERVAL=2")).toBe("biweekly");
+    expect(frequencyFromRule("FREQ=MONTHLY")).toBe("monthly");
+    expect(frequencyFromRule(null)).toBe("none");
+    expect(frequencyFromRule("FREQ=WEEKLY;BYDAY=SA")).toBe("none"); // unknown shapes are treated as not repeating
+  });
+
+  it("makes ordinals, including the teens", () => {
+    expect([1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 30, 31].map(ordinal)).toEqual([
+      "1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "23rd", "30th", "31st",
+    ]);
+  });
+
+  it("describes each option in plain English", () => {
+    expect(describeRepeat("none", "2026-09-19")).toBe("Happens once");
+    expect(describeRepeat("daily", "2026-09-19")).toBe("Repeats every day");
+    expect(describeRepeat("weekly", "2026-09-19")).toBe("Repeats every Saturday");
+    expect(describeRepeat("biweekly", "2026-09-19")).toBe("Repeats every other Saturday");
+    expect(describeRepeat("monthly", "2026-09-19")).toBe("Repeats on the 19th of each month");
+    expect(describeRepeat("monthly", "2026-01-31")).toContain("last day in shorter months");
   });
 });

@@ -53,6 +53,7 @@ beforeAll(async () => {
   await db.exec(read("tests/db/supabase-stub.sql"));
   await db.exec(read("supabase/migrations/0001_init.sql"));
   await db.exec(read("supabase/migrations/0002_remove_completed_chore.sql"));
+  await db.exec(read("supabase/migrations/0003_recurring_chores.sql"));
   for (const id of [ALEX, BLAKE, CASEY, DREW]) {
     await admin(`insert into auth.users (id, email) values ($1, $2)`, [id, `${id}@example.com`]);
   }
@@ -419,5 +420,170 @@ describe("remove_completed_chore", () => {
     const id = await chore(ALEX, "Direct delete", 2);
     await as(ALEX, `select * from public.complete_chore($1, 5, 100)`, [id]);
     expect(await as(ALEX, `delete from public.chore_instances where id = $1 returning id`, [id])).toHaveLength(0);
+  });
+});
+
+describe("recurring chores", () => {
+  const dayFromNow = async (n: number) => (await admin(`select (current_date + $1::int)::text as d`, [n]))[0].d as string;
+  const seriesOf = async (id: string) =>
+    (await admin(`select parent_recurrence_id from public.chore_instances where id = $1`, [id]))[0].parent_recurrence_id as string;
+  const occurrences = (sid: string) =>
+    admin<{ id: string; d: string; title: string; points: number; who: string | null; done: boolean; rule: string }>(
+      `select id, scheduled_date::text d, title, points_assigned points, assigned_to who, is_completed done, recurrence_rule rule
+       from public.chore_instances where parent_recurrence_id = $1 order by scheduled_date`,
+      [sid],
+    );
+  const gap = (a: string, b: string) => (Date.parse(b) - Date.parse(a)) / 86_400_000;
+  const noteCount = async (uid: string, like: string) =>
+    (await as(uid, `select 1 from public.notifications where message like $1`, [like])).length;
+
+  it("counts monthly occurrences from the anchor, so month-ends do not drift", async () => {
+    const occ = (n: number) => admin(`select public.series_occurrence('2026-01-31', 'monthly', $1)::text as d`, [n]);
+    expect((await occ(1))[0].d).toBe("2026-02-28");
+    expect((await occ(2))[0].d).toBe("2026-03-31");
+    expect((await occ(13))[0].d).toBe("2027-02-28");
+  });
+
+  it("make_chore_recurring links the chore to a series and fills 12 weeks ahead", async () => {
+    const start = await dayFromNow(1);
+    const id = await chore(ALEX, "Weekly bins", 4, ALEX, start);
+    await as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [id]);
+    const rows = await occurrences(await seriesOf(id));
+    expect(rows).toHaveLength(13); // the original + 12 weekly repeats
+    expect(rows[0]).toMatchObject({ id, d: start, rule: "FREQ=WEEKLY" });
+    rows.slice(1).forEach((r, i) => expect(gap(rows[i].d, r.d)).toBe(7));
+    expect(rows.every((r) => r.title === "Weekly bins" && r.points === 4 && r.who === ALEX && !r.done)).toBe(true);
+  });
+
+  it("never back-fills a pile of overdue chores when the start date is in the past", async () => {
+    const old = await dayFromNow(-20);
+    const id = await chore(ALEX, "Old daily", 2, ALEX, old);
+    await as(ALEX, `select public.make_chore_recurring($1, 'daily')`, [id]);
+    const rows = await occurrences(await seriesOf(id));
+    const earliest = await dayFromNow(-1);
+    expect(rows[0].d).toBe(old);
+    expect(rows.slice(1).every((r) => r.d >= earliest)).toBe(true);
+  });
+
+  it("a partner-assigned series sends one summary, not one alert per occurrence", async () => {
+    const id = await chore(ALEX, "Blake weekly", 3, BLAKE, await dayFromNow(2));
+    await as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [id]);
+    // 1 for the original assignment + 1 "set to repeat" summary, not 13
+    expect(await noteCount(BLAKE, "%Blake weekly%")).toBe(2);
+    expect(await noteCount(BLAKE, '%set "Blake weekly" to repeat every week for you%')).toBe(1);
+  });
+
+  it("extend tops a series up without resurrecting occurrences you deleted", async () => {
+    const id = await chore(ALEX, "Extend me", 3, ALEX, await dayFromNow(1));
+    await as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [id]);
+    const sid = await seriesOf(id);
+    const before = await occurrences(sid);
+    const deleted = before[2];
+    expect(await as(ALEX, `delete from public.chore_instances where id = $1 returning id`, [deleted.id])).toHaveLength(1);
+
+    await as(ALEX, `select public.extend_recurring_chores(current_date + 200)`);
+    const after = await occurrences(sid);
+    expect(after.length).toBeGreaterThan(before.length);
+    expect(after.some((r) => r.d === deleted.d)).toBe(false);
+
+    await as(ALEX, `select public.extend_recurring_chores(current_date + 200)`); // idempotent
+    expect(await occurrences(sid)).toHaveLength(after.length);
+  });
+
+  it("caps how far ahead it will generate", async () => {
+    const id = await chore(ALEX, "Capped", 1, ALEX, await dayFromNow(1));
+    await as(ALEX, `select public.make_chore_recurring($1, 'daily')`, [id]);
+    await as(ALEX, `select public.extend_recurring_chores(current_date + 5000)`);
+    const rows = await occurrences(await seriesOf(id));
+    expect(rows[rows.length - 1].d <= (await dayFromNow(366))).toBe(true);
+  });
+
+  it("rejects moving an occurrence onto a day the series already uses", async () => {
+    const id = await chore(ALEX, "No doubles", 2, ALEX, await dayFromNow(3));
+    await as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [id]);
+    const [first, second] = await occurrences(await seriesOf(id));
+    await expect(
+      as(ALEX, `update public.chore_instances set scheduled_date = $2 where id = $1`, [second.id, first.d]),
+    ).rejects.toThrow(/duplicate key|unique/i);
+  });
+
+  it("this-and-future edits change later unfinished occurrences only", async () => {
+    const id = await chore(ALEX, "Old name", 5, ALEX, await dayFromNow(1));
+    await as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [id]);
+    const sid = await seriesOf(id);
+    const rows = await occurrences(sid);
+    await as(ALEX, `select * from public.complete_chore($1, 10, 100)`, [rows[0].id]); // finished: stays as it was
+    const pivot = rows[3];
+
+    await as(ALEX, `select public.update_chore_series($1, 'New name', 7, $2, 'weekly')`, [pivot.id, BLAKE]);
+
+    const after = await occurrences(sid);
+    for (const r of after) {
+      if (r.d < pivot.d) expect(r).toMatchObject({ title: "Old name", points: 5, who: ALEX });
+      else expect(r).toMatchObject({ title: "New name", points: 7, who: BLAKE });
+    }
+    expect(after[0].done).toBe(true);
+    expect(after).toHaveLength(rows.length); // same frequency: nothing regenerated
+    expect(await noteCount(BLAKE, "%assigned you the repeating chore: New name%")).toBe(1);
+  });
+
+  it("changing how often it repeats rebuilds the later occurrences", async () => {
+    const id = await chore(ALEX, "Weekly to daily", 2, ALEX, await dayFromNow(1));
+    await as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [id]);
+    const sid = await seriesOf(id);
+    const pivot = (await occurrences(sid))[2];
+    await as(ALEX, `select public.update_chore_series($1, 'Weekly to daily', 2, $2, 'daily')`, [pivot.id, ALEX]);
+    const after = await occurrences(sid);
+    const upTo = after.filter((r) => r.d <= pivot.d);
+    const from = after.filter((r) => r.d >= pivot.d);
+    expect(upTo.map((r) => r.d)).toEqual((await occurrences(sid)).slice(0, upTo.length).map((r) => r.d));
+    from.slice(1).forEach((r, i) => expect(gap(from[i].d, r.d)).toBe(1));
+    expect(from[from.length - 1].rule).toBe("FREQ=DAILY");
+  });
+
+  it("'none' stops the series and later top-ups add nothing", async () => {
+    const id = await chore(ALEX, "Stop me", 2, ALEX, await dayFromNow(1));
+    await as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [id]);
+    const sid = await seriesOf(id);
+    const pivot = (await occurrences(sid))[1];
+    await as(ALEX, `select public.update_chore_series($1, 'Stop me', 2, $2, 'none')`, [pivot.id, ALEX]);
+    const stopped = await occurrences(sid);
+    expect(stopped[stopped.length - 1].d).toBe(pivot.d);
+    await as(ALEX, `select public.extend_recurring_chores(current_date + 300)`);
+    expect(await occurrences(sid)).toHaveLength(stopped.length);
+  });
+
+  it("validates input and refuses invalid states", async () => {
+    const id = await chore(ALEX, "Validate", 2, ALEX, await dayFromNow(1));
+    await expect(as(ALEX, `select public.make_chore_recurring($1, 'hourly')`, [id])).rejects.toThrow(/how often/);
+    await expect(as(ALEX, `select public.update_chore_series($1, 'x', 2, $2, 'weekly')`, [id, ALEX])).rejects.toThrow(/does not repeat/);
+    await as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [id]);
+    await expect(as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [id])).rejects.toThrow(/already repeats/);
+    await expect(as(ALEX, `select public.update_chore_series($1, '  ', 2, $2, 'weekly')`, [id, ALEX])).rejects.toThrow(/name/);
+    await expect(as(ALEX, `select public.update_chore_series($1, 'x', 11, $2, 'weekly')`, [id, ALEX])).rejects.toThrow(/between 1 and 10/);
+    const done = await chore(ALEX, "Already done", 2, ALEX, await dayFromNow(1));
+    await as(ALEX, `select * from public.complete_chore($1, 5, 100)`, [done]);
+    await expect(as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [done])).rejects.toThrow(/completed/);
+  });
+
+  it("is limited to your household and to signed-in users; clients cannot touch series directly", async () => {
+    const id = await chore(ALEX, "Private", 2, ALEX, await dayFromNow(1));
+    await expect(as(DREW, `select public.make_chore_recurring($1, 'weekly')`, [id])).rejects.toThrow(/not found/i);
+    await expect(asAnon(`select public.extend_recurring_chores(current_date)`)).rejects.toThrow(/permission denied/);
+    await expect(
+      as(ALEX, `insert into public.chore_series (household_id, title, points, frequency, start_date, generated_through)
+                values (public.current_household_id(), 'x', 1, 'daily', current_date, current_date)`),
+    ).rejects.toThrow(/permission denied/);
+    await expect(as(ALEX, `select public.generate_series_instances(gen_random_uuid(), current_date)`)).rejects.toThrow(/permission denied/);
+    await as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [id]);
+    expect(await as(DREW, `select 1 from public.chore_series`)).toHaveLength(0);
+    expect((await as(BLAKE, `select 1 from public.chore_series`)).length).toBeGreaterThan(0);
+  });
+
+  it("scheduled chores can now have their points edited, but not completion state", async () => {
+    const id = await chore(ALEX, "Edit points", 3, ALEX, await dayFromNow(1));
+    expect(await as(ALEX, `update public.chore_instances set points_assigned = 9 where id = $1 returning points_assigned`, [id])).toEqual([{ points_assigned: 9 }]);
+    await expect(as(ALEX, `update public.chore_instances set is_completed = true where id = $1`, [id])).rejects.toThrow(/permission denied/);
+    await expect(as(ALEX, `update public.chore_instances set points_assigned = 99 where id = $1`, [id])).rejects.toThrow(/check constraint/);
   });
 });
