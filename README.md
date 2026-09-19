@@ -18,6 +18,17 @@ Next.js (App Router) + Tailwind on Vercel, Supabase for Postgres, Auth and Realt
 The first partner signs up and chooses **Start one** (this seeds the six base chores and a few rewards and makes them the
 admin). The second signs up and chooses **Join partner** with the invite code from the profile menu.
 
+## Database migrations run automatically
+
+`.github/workflows/database.yml` applies new files in `supabase/migrations/` to production whenever they land on `main`
+(after running `npm run test:db`), so nobody pastes SQL by hand. Add three repository secrets under GitHub → Settings →
+Secrets and variables → Actions: `SUPABASE_ACCESS_TOKEN`, `SUPABASE_DB_PASSWORD`, `SUPABASE_PROJECT_ID`. Until they exist the
+workflow only warns and changes nothing.
+
+If migrations were already applied by hand, run the workflow once from the Actions tab with **baseline** set to those
+versions (e.g. `0001 0002 0003`) so they are recorded as done instead of being applied twice. New migrations must be numbered
+in order (`0004_…`) and should be additive; a migration runs against live data as soon as it reaches `main`.
+
 ## Scripts
 
 | | |
