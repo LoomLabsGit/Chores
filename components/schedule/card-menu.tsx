@@ -7,6 +7,7 @@ import { Icon, type IconName } from "../icons";
 
 export type CardActions = {
   onEdit: (i: ChoreInstance) => void;
+  onChangeDate: (i: ChoreInstance) => void;
   onUncheck: (i: ChoreInstance) => void;
   onDelete: (i: ChoreInstance) => void;
 };
@@ -14,11 +15,12 @@ export type CardActions = {
 type Item = { key: string; label: string; icon: IconName; danger?: boolean; run: () => void };
 
 const ITEM_HEIGHT = 44;
-const MENU_WIDTH = 184;
+const MENU_WIDTH = 192;
 
 /**
  * The "..." menu on a chore card. What it offers depends on the chore:
- * unfinished -> Edit, Delete; finished -> Edit, Uncheck, Delete. (Editing a finished chore
+ * unfinished -> Edit, Change date, Delete; finished -> Edit, Change date, Uncheck, Delete.
+ * (Editing a finished chore
  * changes its name, day and assignee only; its points stay as paid out unless it is unchecked.)
  * Rendered in a portal so it is never clipped by the card, column or bottom nav.
  */
@@ -30,11 +32,13 @@ export function CardMenu({ instance, actions }: { instance: ChoreInstance; actio
   const items: Item[] = instance.is_completed
     ? [
         { key: "edit", label: "Edit", icon: "pencil", run: () => actions.onEdit(instance) },
+        { key: "date", label: "Change date", icon: "calendar", run: () => actions.onChangeDate(instance) },
         { key: "uncheck", label: "Uncheck", icon: "undo", run: () => actions.onUncheck(instance) },
         { key: "delete", label: "Delete", icon: "trash", danger: true, run: () => actions.onDelete(instance) },
       ]
     : [
         { key: "edit", label: "Edit", icon: "pencil", run: () => actions.onEdit(instance) },
+        { key: "date", label: "Change date", icon: "calendar", run: () => actions.onChangeDate(instance) },
         { key: "delete", label: "Delete", icon: "trash", danger: true, run: () => actions.onDelete(instance) },
       ];
 

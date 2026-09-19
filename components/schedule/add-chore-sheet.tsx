@@ -3,31 +3,75 @@
 import { useState } from "react";
 import { formatLongDay } from "@/lib/logic/dates";
 import { allChoresAlphabetical, commonChores, recentChores } from "@/lib/logic/library";
+import { describeRepeat, REPEAT_OPTIONS, type RepeatChoice } from "@/lib/logic/recurrence";
+import { formatMinutes } from "@/lib/logic/split";
 import { useHousehold } from "@/lib/store/household-store";
 import type { ChoreLibraryItem } from "@/lib/types";
 import { Icon } from "../icons";
 import { useToast } from "../toast";
-import { Avatar, fieldClass, Segmented, Stepper } from "../ui/controls";
+import { Avatar, fieldClass, primaryButton, Segmented, Stepper } from "../ui/controls";
 import { ConfirmDialog, Modal } from "../ui/modal";
 
-export function AddChoreSheet({ open, date, onClose }: { open: boolean; date: string; onClose: () => void }) {
-  // Mounted only while open, so the assignee choice resets on every opening.
+/** What the user picked in step 1, waiting for "when / who / repeat" in step 2. */
+type Draft =
+  | { kind: "library"; chore: ChoreLibraryItem }
+  | { kind: "new"; title: string; points: number; minutes: number };
+
+type Props = {
+  open: boolean;
+  /** Day to start on (the day whose "+" was tapped, or the day being viewed). */
+  date: string;
+  onClose: () => void;
+  /** Called with the day a chore was added to, so the calendar can jump to that week. */
+  onAdded: (date: string) => void;
+};
+
+export function AddChoreSheet({ open, ...rest }: Props) {
+  // Mounted only while open, so every opening starts fresh at step 1.
   if (!open) return null;
-  return <Sheet date={date} onClose={onClose} />;
+  return <Sheet {...rest} />;
 }
 
-function Sheet({ date, onClose }: { date: string; onClose: () => void }) {
-  const { me } = useHousehold();
-  const [assignee, setAssignee] = useState(me.id);
+function Sheet({ date, onClose, onAdded }: Omit<Props, "open">) {
+  const [draft, setDraft] = useState<Draft | null>(null);
+  // Remember a typed chore so "Back" does not lose it.
+  const [typed, setTyped] = useState({ title: "", points: 5, minutes: 15 });
+
   return (
     <Modal
       open
       onClose={onClose}
       title="Add chore"
       variant="sheet"
-      footer={<NewChoreInput date={date} assignee={assignee} onDone={onClose} />}
+      headerExtra={
+        draft && (
+          <button
+            onClick={() => setDraft(null)}
+            aria-label="Back to choosing a chore"
+            className="flex h-11 items-center gap-1 rounded-full pl-2 pr-3 text-sm font-bold text-brand hover:bg-brand-soft"
+          >
+            <Icon name="chevron-left" size={18} />
+            Back
+          </button>
+        )
+      }
+      footer={
+        draft ? undefined : (
+          <NewChoreInput
+            initial={typed}
+            onNext={(t) => {
+              setTyped(t);
+              setDraft({ kind: "new", ...t });
+            }}
+          />
+        )
+      }
     >
-      <Library date={date} assignee={assignee} onAssign={setAssignee} onClose={onClose} />
+      {draft ? (
+        <WhenWhoRepeat draft={draft} date={date} onClose={onClose} onAdded={onAdded} />
+      ) : (
+        <Library onPick={(chore) => setDraft({ kind: "library", chore })} />
+      )}
     </Modal>
   );
 }
@@ -66,18 +110,9 @@ function Pill({
   );
 }
 
-function Library({
-  date,
-  assignee,
-  onAssign,
-  onClose,
-}: {
-  date: string;
-  assignee: string;
-  onAssign: (id: string) => void;
-  onClose: () => void;
-}) {
-  const { me, partner, state, tone, actions } = useHousehold();
+/** Step 1: choose from the library (or type a new chore in the docked input). */
+function Library({ onPick }: { onPick: (c: ChoreLibraryItem) => void }) {
+  const { state, actions } = useHousehold();
   const { toast } = useToast();
   const [pendingDelete, setPendingDelete] = useState<ChoreLibraryItem | null>(null);
 
@@ -85,34 +120,9 @@ function Library({
   const common = commonChores(state.library);
   const all = allChoresAlphabetical(state.library);
 
-  function pick(chore: ChoreLibraryItem) {
-    onClose();
-    void actions.scheduleChore(chore, date, assignee).then((ok) => ok && toast(`Added ${chore.title} to ${formatLongDay(date)}`, "success"));
-  }
-
   return (
     <div className="flex flex-col gap-5">
-      <div className="flex flex-col gap-2">
-        <p className="text-sm font-semibold text-muted">
-          Adding to <span className="font-extrabold text-ink">{formatLongDay(date)}</span>
-        </p>
-        {partner && (
-          <Segmented
-            label="Assign to"
-            value={assignee}
-            onChange={onAssign}
-            options={[me, partner].map((m) => ({
-              value: m.id,
-              label: (
-                <>
-                  <Avatar name={m.display_name} tone={tone(m.id)} size={22} />
-                  {m.id === me.id ? "Me" : m.display_name}
-                </>
-              ),
-            }))}
-          />
-        )}
-      </div>
+      <p className="text-sm font-semibold text-muted">Pick a chore, or type a new one below.</p>
 
       {recent.length > 0 && (
         <section aria-labelledby="recent-h">
@@ -121,7 +131,7 @@ function Library({
           </h3>
           <div className="no-scrollbar -mx-5 flex gap-2 overflow-x-auto px-5 pb-1">
             {recent.map((c) => (
-              <Pill key={c.id} chore={c} onPick={pick} />
+              <Pill key={c.id} chore={c} onPick={onPick} />
             ))}
           </div>
         </section>
@@ -134,7 +144,7 @@ function Library({
           </h3>
           <div className="flex flex-wrap gap-2">
             {common.map((c) => (
-              <Pill key={c.id} chore={c} onPick={pick} />
+              <Pill key={c.id} chore={c} onPick={onPick} />
             ))}
           </div>
         </section>
@@ -151,7 +161,7 @@ function Library({
         ) : (
           <div className="flex flex-wrap gap-2">
             {all.map((c) => (
-              <Pill key={c.id} chore={c} onPick={pick} onDelete={setPendingDelete} />
+              <Pill key={c.id} chore={c} onPick={onPick} onDelete={setPendingDelete} />
             ))}
           </div>
         )}
@@ -174,22 +184,23 @@ function Library({
   );
 }
 
-/** Docked at the bottom of the sheet: type a name, set points + duration, add. */
-function NewChoreInput({ date, assignee, onDone }: { date: string; assignee: string; onDone: () => void }) {
-  const { actions } = useHousehold();
-  const { toast } = useToast();
-  const [title, setTitle] = useState("");
-  const [points, setPoints] = useState(5);
-  const [minutes, setMinutes] = useState(15);
+/** Docked at the bottom of step 1: type a name, set points + duration, continue. */
+function NewChoreInput({
+  initial,
+  onNext,
+}: {
+  initial: { title: string; points: number; minutes: number };
+  onNext: (t: { title: string; points: number; minutes: number }) => void;
+}) {
+  const [title, setTitle] = useState(initial.title);
+  const [points, setPoints] = useState(initial.points);
+  const [minutes, setMinutes] = useState(initial.minutes);
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
     const name = title.trim();
     if (!name) return;
-    onDone();
-    void actions
-      .createAndScheduleChore({ title: name, points, minutes }, date, assignee)
-      .then((ok) => ok && toast(`Added ${name} to ${formatLongDay(date)}`, "success"));
+    onNext({ title: name, points, minutes });
   }
 
   return (
@@ -201,16 +212,16 @@ function NewChoreInput({ date, assignee, onDone }: { date: string; assignee: str
           maxLength={60}
           placeholder="Add a new chore..."
           aria-label="New chore name"
-          enterKeyHint="done"
+          enterKeyHint="next"
           className={fieldClass}
         />
         <button
           type="submit"
           disabled={!title.trim()}
-          aria-label="Add chore"
+          aria-label="Continue with this new chore"
           className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-brand text-brand-ink disabled:opacity-40"
         >
-          <Icon name="plus" size={24} strokeWidth={2.5} />
+          <Icon name="chevron-right" size={24} strokeWidth={2.5} />
         </button>
       </div>
       <div className="flex items-center justify-between gap-2">
@@ -223,6 +234,113 @@ function NewChoreInput({ date, assignee, onDone }: { date: string; assignee: str
           <span className="text-xs font-bold text-muted">min</span>
         </div>
       </div>
+    </form>
+  );
+}
+
+/** Step 2: which day, who does it, and whether it repeats. Nothing is added until "Add". */
+function WhenWhoRepeat({
+  draft,
+  date,
+  onClose,
+  onAdded,
+}: {
+  draft: Draft;
+  date: string;
+  onClose: () => void;
+  onAdded: (date: string) => void;
+}) {
+  const { me, partner, tone, actions } = useHousehold();
+  const { toast } = useToast();
+  const [day, setDay] = useState(date);
+  const [assignee, setAssignee] = useState(me.id);
+  const [repeat, setRepeat] = useState<RepeatChoice>("none");
+
+  const name = draft.kind === "library" ? draft.chore.title : draft.title;
+  const points = draft.kind === "library" ? draft.chore.default_points : draft.points;
+  const minutes = draft.kind === "library" ? draft.chore.default_duration : draft.minutes;
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!day) return;
+    const repeating = repeat !== "none" ? repeat : undefined;
+    onClose();
+    onAdded(day); // jump the calendar to that week straight away; the chore appears optimistically
+    const run =
+      draft.kind === "library"
+        ? actions.scheduleChore(draft.chore, day, assignee, repeat)
+        : actions.createAndScheduleChore({ title: draft.title, points: draft.points, minutes: draft.minutes }, day, assignee, repeat);
+    void run.then(
+      (ok) =>
+        ok &&
+        toast(repeating ? `Added ${name}. ${describeRepeat(repeat, day)}` : `Added ${name} to ${formatLongDay(day)}`, "success"),
+    );
+  }
+
+  return (
+    <form onSubmit={submit} className="flex flex-col gap-5">
+      <div className="rounded-2xl bg-raised p-4">
+        <p className="text-lg font-extrabold leading-snug">{name}</p>
+        <p className="mt-1 flex items-center gap-3 text-sm font-bold text-muted">
+          <span className="flex items-center gap-1 text-gold">
+            <Icon name="star" size={13} />
+            {points} pts
+          </span>
+          <span>{formatMinutes(minutes)}</span>
+        </p>
+      </div>
+
+      <label className="flex flex-col gap-1.5 text-sm font-extrabold">
+        Day
+        <input type="date" required value={day} onChange={(e) => setDay(e.target.value)} className={fieldClass} />
+        <span className="text-xs font-semibold text-muted">{day ? formatLongDay(day) : "Choose a day"}</span>
+      </label>
+
+      {partner && (
+        <div className="flex flex-col gap-1.5">
+          <span className="text-sm font-extrabold">Assigned to</span>
+          <Segmented
+            label="Assigned to"
+            value={assignee}
+            onChange={setAssignee}
+            options={[me, partner].map((m) => ({
+              value: m.id,
+              label: (
+                <>
+                  <Avatar name={m.display_name} tone={tone(m.id)} size={22} />
+                  {m.id === me.id ? "Me" : m.display_name}
+                </>
+              ),
+            }))}
+          />
+        </div>
+      )}
+
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="add-repeat" className="text-sm font-extrabold">
+          Repeat
+        </label>
+        <select
+          id="add-repeat"
+          value={repeat}
+          onChange={(e) => setRepeat(e.target.value as RepeatChoice)}
+          className={fieldClass}
+        >
+          {REPEAT_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+        <p className="text-xs font-semibold text-muted" aria-live="polite">
+          {day ? describeRepeat(repeat, day) : ""}
+        </p>
+      </div>
+
+      <button type="submit" disabled={!day} className={`${primaryButton} min-h-14 text-lg`}>
+        <Icon name="plus" strokeWidth={2.6} />
+        {repeat === "none" ? "Add chore" : "Add and repeat"}
+      </button>
     </form>
   );
 }

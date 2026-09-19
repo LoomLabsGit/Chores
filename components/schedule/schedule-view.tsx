@@ -31,6 +31,7 @@ import { Icon } from "../icons";
 import { useToast } from "../toast";
 import { Avatar, EmptyState, TONE_SOFT } from "../ui/controls";
 import { AddChoreSheet } from "./add-chore-sheet";
+import { DateSheet } from "./date-sheet";
 import { CardActions } from "./card-menu";
 import { ChoreCard, ChoreCardView } from "./chore-card";
 import { CompleteSheet } from "./complete-sheet";
@@ -52,6 +53,8 @@ export function ScheduleView() {
   const [weekStart, setWeekStart] = useState(() => startOfWeek(today));
   const [selected, setSelected] = useState(today);
   const [addOpen, setAddOpen] = useState(false);
+  const [addDate, setAddDate] = useState(today);
+  const [dating, setDating] = useState<ChoreInstance | null>(null);
   const [completing, setCompleting] = useState<ChoreInstance | null>(null);
   const [removing, setRemoving] = useState<ChoreInstance | null>(null);
   const [editing, setEditing] = useState<ChoreInstance | null>(null);
@@ -108,8 +111,16 @@ export function ScheduleView() {
 
   const selectedList = byDate[selected] ?? [];
 
+  /** Opens the Add Chore sheet on a specific day (the "+" on a day) and selects that day. */
+  function openAdd(date: string) {
+    setSelected(date);
+    setAddDate(date);
+    setAddOpen(true);
+  }
+
   const cardActions: CardActions = {
     onEdit: setEditing,
+    onChangeDate: setDating,
     onDelete: setRemoving,
     onUncheck: (inst) => {
       const takenBack = pointsTakenBack(state.completions[inst.id], nameOf);
@@ -146,6 +157,7 @@ export function ScheduleView() {
                 selected={selected === d}
                 instances={byDate[d]}
                 onSelect={() => setSelected(d)}
+                onAdd={() => openAdd(d)}
                 onOpen={setCompleting}
                 actions={cardActions}
               />
@@ -169,13 +181,24 @@ export function ScheduleView() {
             </div>
 
             <section aria-label={formatLongDay(selected)} className="flex flex-col gap-2.5">
-              <div className="flex items-baseline justify-between px-1">
-                <h2 className="text-lg font-extrabold">{selected === today ? "Today" : formatLongDay(selected)}</h2>
-                <p className="text-sm font-semibold text-muted">
-                  {selectedList.length
-                    ? `${selectedList.filter((i) => i.is_completed).length} of ${selectedList.length} done`
-                    : formatLongDay(selected)}
-                </p>
+              <div className="flex items-center justify-between gap-2 px-1">
+                <h2 className="min-w-0 truncate text-lg font-extrabold">
+                  {selected === today ? "Today" : formatLongDay(selected)}
+                </h2>
+                <div className="flex shrink-0 items-center gap-2">
+                  <p className="text-sm font-semibold text-muted">
+                    {selectedList.length
+                      ? `${selectedList.filter((i) => i.is_completed).length} of ${selectedList.length} done`
+                      : ""}
+                  </p>
+                  <button
+                    onClick={() => openAdd(selected)}
+                    aria-label={`Add a chore on ${formatLongDay(selected)}`}
+                    className="flex h-11 w-11 items-center justify-center rounded-full bg-brand-soft text-brand active:scale-95"
+                  >
+                    <Icon name="plus" size={22} strokeWidth={2.6} />
+                  </button>
+                </div>
               </div>
               {selectedList.length === 0 ? (
                 <EmptyState icon={<Icon name="calendar" size={26} />} title="Nothing planned">
@@ -203,7 +226,7 @@ export function ScheduleView() {
       <AssignDock visible={!!dragId} currentAssignee={dragging?.assigned_to ?? null} />
 
       <button
-        onClick={() => setAddOpen(true)}
+        onClick={() => openAdd(selected)}
         className={`fixed bottom-[calc(env(safe-area-inset-bottom)+5rem)] right-4 z-30 flex h-14 items-center gap-2 rounded-full bg-brand pl-4 pr-5 text-base font-extrabold text-brand-ink shadow-sheet transition-all active:scale-95 md:bottom-8 md:right-8 ${
           dragId ? "pointer-events-none translate-y-4 opacity-0" : ""
         }`}
@@ -212,7 +235,13 @@ export function ScheduleView() {
         Add Chore
       </button>
 
-      <AddChoreSheet open={addOpen} date={selected} onClose={() => setAddOpen(false)} />
+      <AddChoreSheet
+        open={addOpen}
+        date={addDate}
+        onClose={() => setAddOpen(false)}
+        onAdded={(d) => goToWeek(startOfWeek(d), d)}
+      />
+      <DateSheet instance={dating} onClose={() => setDating(null)} onMoved={(d) => goToWeek(startOfWeek(d), d)} />
       <CompleteSheet
         instance={completing}
         onClose={() => setCompleting(null)}
@@ -341,6 +370,7 @@ function DayColumn({
   selected,
   instances,
   onSelect,
+  onAdd,
   onOpen,
   actions,
 }: {
@@ -349,6 +379,7 @@ function DayColumn({
   selected: boolean;
   instances: ChoreInstance[];
   onSelect: () => void;
+  onAdd: () => void;
   onOpen: (i: ChoreInstance) => void;
   actions: CardActions;
 }) {
@@ -372,6 +403,13 @@ function DayColumn({
           {weekdayShort(date)}
         </span>
         <span className="text-xl font-extrabold leading-tight">{dayOfMonth(date)}</span>
+      </button>
+      <button
+        onClick={onAdd}
+        aria-label={`Add a chore on ${formatLongDay(date)}`}
+        className="flex min-h-11 w-full items-center justify-center rounded-2xl border border-dashed border-line text-muted transition-colors hover:border-brand hover:bg-brand-soft hover:text-brand"
+      >
+        <Icon name="plus" size={20} strokeWidth={2.4} />
       </button>
       {instances.length === 0 ? (
         <p className="px-2 pt-4 text-center text-xs font-semibold text-muted">Free day</p>

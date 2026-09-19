@@ -167,8 +167,8 @@ export type StatsData = { completions: ChoreCompletion[]; instances: ChoreInstan
 export type Actions = {
   loadWeek: (from: string, to: string) => Promise<void>;
   moveInstance: (id: string, patch: { scheduled_date?: string; assigned_to?: string | null }) => Promise<boolean>;
-  scheduleChore: (chore: ChoreLibraryItem, date: string, assignedTo: string) => Promise<boolean>;
-  createAndScheduleChore: (chore: NewChore, date: string, assignedTo: string) => Promise<boolean>;
+  scheduleChore: (chore: ChoreLibraryItem, date: string, assignedTo: string, repeat?: RepeatChoice) => Promise<boolean>;
+  createAndScheduleChore: (chore: NewChore, date: string, assignedTo: string, repeat?: RepeatChoice) => Promise<boolean>;
   archiveChore: (id: string) => Promise<boolean>;
   removeInstance: (id: string) => Promise<boolean>;
   editChore: (instance: ChoreInstance, edit: ChoreEdit) => Promise<boolean>;
@@ -441,7 +441,7 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
         return true;
       },
 
-      async scheduleChore(chore, date, assignedTo) {
+      async scheduleChore(chore, date, assignedTo, repeat = "none") {
         const id = uuid();
         const row: ChoreInstance = {
           id,
@@ -474,17 +474,30 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           dispatch({ type: "instance-remove", id });
           return fail(error);
         }
+
+        if (repeat !== "none") {
+          // The chore exists on the server now, so it can be turned into a repeating series.
+          const { error: repeatError } = await supabase.rpc("make_chore_recurring", {
+            p_instance_id: id,
+            p_frequency: repeat,
+          });
+          const range = rangeRef.current;
+          if (range) await loadWeek(range.from, range.to);
+          if (repeatError) {
+            toast(`Added, but it could not be set to repeat: ${friendlyError(repeatError)}`, "error");
+          }
+        }
         return true;
       },
 
-      async createAndScheduleChore(input, date, assignedTo) {
+      async createAndScheduleChore(input, date, assignedTo, repeat = "none") {
         const title = input.title.trim();
         if (!title) return false;
         // Re-use an existing library chore with the same name instead of duplicating it.
         const existing = stateRef.current.library.find(
           (c) => !c.is_archived && c.title.toLowerCase() === title.toLowerCase(),
         );
-        if (existing) return api.scheduleChore(existing, date, assignedTo);
+        if (existing) return api.scheduleChore(existing, date, assignedTo, repeat);
 
         const libId = uuid();
         const lib: ChoreLibraryItem = {
@@ -510,7 +523,7 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           dispatch({ type: "remove", key: "library", id: libId });
           return fail(error);
         }
-        return api.scheduleChore(lib, date, assignedTo);
+        return api.scheduleChore(lib, date, assignedTo, repeat);
       },
 
       async archiveChore(id) {
