@@ -1,0 +1,348 @@
+import { describe, expect, it } from "vitest";
+import { badgeCount } from "@/lib/logic/notifications";
+import { progressPct } from "@/lib/logic/challenges";
+import {
+  addDays,
+  formatWeekTitle,
+  isoOfTimestamp,
+  parseISODate,
+  startOfWeek,
+  toISODate,
+  weekDays,
+} from "@/lib/logic/dates";
+import { allChoresAlphabetical, commonChores, recentChores } from "@/lib/logic/library";
+import { clampMinutes, computeSplit, formatMinutes, share } from "@/lib/logic/split";
+import { computeStats, timeframeStart } from "@/lib/logic/stats";
+import type {
+  AppNotification,
+  Challenge,
+  ChoreCompletion,
+  ChoreLibraryItem,
+  RewardRedemption,
+} from "@/lib/types";
+
+describe("dates", () => {
+  it("weeks run Monday to Sunday", () => {
+    expect(startOfWeek("2026-09-18")).toBe("2026-09-14"); // Friday -> Monday
+    expect(startOfWeek("2026-09-14")).toBe("2026-09-14"); // Monday stays
+    expect(startOfWeek("2026-09-20")).toBe("2026-09-14"); // Sunday belongs to the week before
+    expect(weekDays("2026-09-14")).toEqual([
+      "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18", "2026-09-19", "2026-09-20",
+    ]);
+  });
+
+  it("adds days across month and year boundaries and DST", () => {
+    expect(addDays("2026-12-30", 3)).toBe("2027-01-02");
+    expect(addDays("2026-03-01", -1)).toBe("2026-02-28");
+    // UK clocks change 2026-03-29 and 2026-10-25; date maths must not drift.
+    expect(addDays("2026-03-28", 2)).toBe("2026-03-30");
+    expect(addDays("2026-10-24", 2)).toBe("2026-10-26");
+  });
+
+  it("round-trips local dates without a UTC shift", () => {
+    expect(toISODate(parseISODate("2026-01-01"))).toBe("2026-01-01");
+    // 23:30 local must still be the same local calendar day.
+    expect(isoOfTimestamp(new Date(2026, 8, 18, 23, 30).toISOString())).toBe("2026-09-18");
+    expect(isoOfTimestamp(new Date(2026, 8, 18, 0, 15).toISOString())).toBe("2026-09-18");
+  });
+
+  it("titles weeks that span months and years", () => {
+    expect(formatWeekTitle("2026-09-14")).toBe("September 2026");
+    expect(formatWeekTitle("2026-09-28")).toBe("Sep – Oct 2026");
+    expect(formatWeekTitle("2026-12-28")).toBe("Dec 2026 – Jan 2027");
+  });
+});
+
+describe("split maths", () => {
+  it("matches the spec's example: 60/40 of 30 min and 10 pts", () => {
+    const s = computeSplit(30, 10, 60);
+    expect(s.me).toEqual({ pct: 60, minutes: 18, points: 6 });
+    expect(s.partner).toEqual({ pct: 40, minutes: 12, points: 4 });
+  });
+
+  it("uses round-to-nearest on each side independently (ties round up)", () => {
+    expect(share(5, 50)).toBe(3); // 2.5 -> 3
+    expect(share(3, 50)).toBe(2); // 1.5 -> 2
+    expect(share(15, 30)).toBe(5); // 4.5 -> 5
+    expect(share(7, 10)).toBe(1); // 0.7 -> 1
+    expect(share(4, 10)).toBe(0); // 0.4 -> 0
+    const s = computeSplit(5, 5, 50);
+    expect(s.me.points + s.partner.points).toBe(6);
+  });
+
+  it("only ever produces whole numbers", () => {
+    for (let total = 0; total <= 120; total++) {
+      for (let pct = 0; pct <= 100; pct += 10) {
+        const s = computeSplit(total, 7, pct);
+        for (const n of [s.me.minutes, s.me.points, s.partner.minutes, s.partner.points]) {
+          expect(Number.isInteger(n)).toBe(true);
+        }
+      }
+    }
+  });
+
+  it("handles the extremes", () => {
+    expect(computeSplit(20, 8, 100).partner).toEqual({ pct: 0, minutes: 0, points: 0 });
+    expect(computeSplit(20, 8, 0).me).toEqual({ pct: 0, minutes: 0, points: 0 });
+  });
+
+  it("clamps and formats durations", () => {
+    expect(clampMinutes(-5)).toBe(0);
+    expect(clampMinutes(99999)).toBe(1440);
+    expect(clampMinutes(Number.NaN)).toBe(0);
+    expect(formatMinutes(0)).toBe("0m");
+    expect(formatMinutes(45)).toBe("45m");
+    expect(formatMinutes(60)).toBe("1h");
+    expect(formatMinutes(75)).toBe("1h 15m");
+  });
+});
+
+const lib = (over: Partial<ChoreLibraryItem>): ChoreLibraryItem => ({
+  id: over.title ?? "x",
+  household_id: "h",
+  title: "x",
+  category: "General",
+  default_duration: 15,
+  default_points: 5,
+  is_archived: false,
+  last_used_at: null,
+  created_at: "2026-01-01T00:00:00Z",
+  ...over,
+});
+
+describe("chore library groupings", () => {
+  const items = [
+    lib({ title: "Washing up", last_used_at: "2026-09-10T10:00:00Z" }),
+    lib({ title: "Hoovering", last_used_at: "2026-09-12T10:00:00Z" }),
+    lib({ title: "Bins", last_used_at: "2026-09-15T10:00:00Z" }),
+    lib({ title: "Ironing", last_used_at: "2026-09-11T10:00:00Z" }),
+    lib({ title: "Dusting", last_used_at: "2026-09-14T10:00:00Z" }),
+    lib({ title: "Cooking dinner", last_used_at: "2026-09-13T10:00:00Z" }),
+    lib({ title: "Old", last_used_at: "2026-09-16T10:00:00Z", is_archived: true }),
+    lib({ title: "Hanging laundry" }), // never scheduled
+    lib({ title: "apples" }),
+  ];
+
+  it("recent = the 5 most recently scheduled, newest first, no archived or never-used", () => {
+    expect(recentChores(items).map((c) => c.title)).toEqual([
+      "Bins", "Dusting", "Cooking dinner", "Hoovering", "Ironing",
+    ]);
+  });
+
+  it("common = the six base chores that still exist, in spec order", () => {
+    expect(commonChores(items).map((c) => c.title)).toEqual([
+      "Washing up", "Hoovering", "Cooking dinner", "Hanging laundry",
+    ]);
+    expect(commonChores(items.map((c) => (c.title === "Washing up" ? { ...c, is_archived: true } : c))).map((c) => c.title))
+      .not.toContain("Washing up");
+  });
+
+  it("all = alphabetical, case-insensitive, without archived", () => {
+    expect(allChoresAlphabetical(items).map((c) => c.title)).toEqual([
+      "apples", "Bins", "Cooking dinner", "Dusting", "Hanging laundry", "Hoovering", "Ironing", "Washing up",
+    ]);
+  });
+});
+
+const note = (over: Partial<AppNotification>): AppNotification => ({
+  id: Math.random().toString(),
+  recipient_id: "me",
+  actor_id: "them",
+  type: "chore_completed",
+  reference_id: null,
+  message: "m",
+  is_read: false,
+  created_at: "2026-09-18T10:00:00Z",
+  ...over,
+});
+const challenge = (over: Partial<Challenge>): Challenge => ({
+  id: "c1",
+  household_id: "h",
+  creator_id: "them",
+  assigned_to: "me",
+  title: "t",
+  target_count: 4,
+  current_count: 0,
+  reward_points: 20,
+  status: "pending",
+  created_at: "2026-09-18T10:00:00Z",
+  completed_at: null,
+  ...over,
+});
+
+describe("bell badge", () => {
+  it("counts unread alerts", () => {
+    expect(badgeCount([note({}), note({}), note({ is_read: true })], [], "me")).toBe(2);
+  });
+
+  it("does not double count a proposal and its unread alert", () => {
+    const n = [note({ type: "challenge_proposed", reference_id: "c1" })];
+    expect(badgeCount(n, [challenge({})], "me")).toBe(1);
+  });
+
+  it("keeps counting a pending proposal after its alert was read", () => {
+    const n = [note({ type: "challenge_proposed", reference_id: "c1", is_read: true })];
+    expect(badgeCount(n, [challenge({})], "me")).toBe(1);
+    expect(badgeCount(n, [challenge({ status: "active" })], "me")).toBe(0);
+  });
+
+  it("ignores proposals aimed at the partner", () => {
+    expect(badgeCount([], [challenge({ assigned_to: "them", creator_id: "me" })], "me")).toBe(0);
+  });
+});
+
+describe("challenge progress", () => {
+  it("is proportional and capped", () => {
+    expect(progressPct({ current_count: 3, target_count: 12 })).toBe(25);
+    expect(progressPct({ current_count: 12, target_count: 12 })).toBe(100);
+    expect(progressPct({ current_count: 20, target_count: 12 })).toBe(100);
+    expect(progressPct({ current_count: 0, target_count: 0 })).toBe(0);
+  });
+});
+
+describe("stats", () => {
+  const A = "a";
+  const B = "b";
+  const at = (iso: string, h = 12) => {
+    const d = parseISODate(iso);
+    d.setHours(h);
+    return d.toISOString();
+  };
+
+  const completion = (over: Partial<ChoreCompletion>): ChoreCompletion => ({
+    id: Math.random().toString(),
+    instance_id: "i1",
+    total_duration_minutes: 30,
+    user_a_id: A,
+    user_a_duration: 30,
+    user_a_points: 5,
+    user_b_id: B,
+    user_b_duration: 0,
+    user_b_points: 0,
+    created_at: at("2026-09-18"),
+    ...over,
+  });
+
+  const base = {
+    memberIds: [A, B],
+    library: [
+      { id: "kitchen", category: "Kitchen" },
+      { id: "garden", category: "Garden" },
+    ],
+    challenges: [] as Challenge[],
+    redemptions: [] as RewardRedemption[],
+    start: "2026-09-01",
+  };
+
+  it("computes the effort split, per-partner time and whole-number percentages", () => {
+    const r = computeStats({
+      ...base,
+      instances: [{ id: "i1", chore_id: "kitchen", scheduled_date: "2026-09-18", completed_at: at("2026-09-18") }],
+      completions: [
+        completion({ user_a_duration: 18, user_a_points: 6, user_b_duration: 12, user_b_points: 4 }),
+        completion({ instance_id: "i1", user_a_duration: 10, total_duration_minutes: 10, user_b_duration: 0 }),
+      ],
+    });
+    expect(r.perUser[A].minutes).toBe(28);
+    expect(r.perUser[B].minutes).toBe(12);
+    expect(r.totalMinutes).toBe(40);
+    expect(r.split).toEqual({ [A]: 70, [B]: 30 });
+  });
+
+  it("split always sums to 100 even when rounding would not", () => {
+    const r = computeStats({
+      ...base,
+      instances: [],
+      completions: [
+        completion({ user_a_duration: 1, user_b_duration: 2, total_duration_minutes: 3 }), // 33.3 / 66.7
+        completion({ user_a_duration: 1, user_b_duration: 1, total_duration_minutes: 2 }),
+      ],
+    });
+    // 2 / 3 minutes -> 67% / 33%
+    expect(r.split![A] + r.split![B]).toBe(100);
+  });
+
+  it("returns null split with nothing logged", () => {
+    const r = computeStats({ ...base, instances: [], completions: [] });
+    expect(r.split).toBeNull();
+    expect(r.consistency.onTimePct).toBeNull();
+  });
+
+  it("filters by the window start", () => {
+    const r = computeStats({
+      ...base,
+      start: "2026-09-18",
+      instances: [],
+      completions: [
+        completion({ created_at: at("2026-09-17", 23) }),
+        completion({ created_at: at("2026-09-18", 0) }),
+      ],
+    });
+    expect(r.completionCount).toBe(1);
+  });
+
+  it("groups minutes by category (General fallback) sorted high to low", () => {
+    const r = computeStats({
+      ...base,
+      instances: [
+        { id: "i1", chore_id: "kitchen", scheduled_date: "2026-09-18", completed_at: at("2026-09-18") },
+        { id: "i2", chore_id: "garden", scheduled_date: "2026-09-18", completed_at: at("2026-09-18") },
+        { id: "i3", chore_id: null, scheduled_date: "2026-09-18", completed_at: at("2026-09-18") },
+      ],
+      completions: [
+        completion({ instance_id: "i1", total_duration_minutes: 45 }),
+        completion({ instance_id: "i2", total_duration_minutes: 10 }),
+        completion({ instance_id: "i3", total_duration_minutes: 20 }),
+        completion({ instance_id: "i1", total_duration_minutes: 15 }),
+      ],
+    });
+    expect(r.categories).toEqual([
+      { category: "Kitchen", minutes: 60 },
+      { category: "General", minutes: 20 },
+      { category: "Garden", minutes: 10 },
+    ]);
+  });
+
+  it("scores consistency: done on or before the scheduled day is on time", () => {
+    const r = computeStats({
+      ...base,
+      instances: [
+        { id: "early", chore_id: null, scheduled_date: "2026-09-20", completed_at: at("2026-09-18") },
+        { id: "same", chore_id: null, scheduled_date: "2026-09-18", completed_at: at("2026-09-18", 23) },
+        { id: "late", chore_id: null, scheduled_date: "2026-09-10", completed_at: at("2026-09-18") },
+      ],
+      completions: [
+        completion({ instance_id: "early" }),
+        completion({ instance_id: "same" }),
+        completion({ instance_id: "late" }),
+      ],
+    });
+    expect(r.consistency).toEqual({ onTime: 2, delayed: 1, onTimePct: 67 });
+  });
+
+  it("tracks points earned (chores + completed challenges) versus spent", () => {
+    const r = computeStats({
+      ...base,
+      instances: [],
+      completions: [completion({ user_a_points: 6, user_b_points: 4 })],
+      challenges: [
+        challenge({ id: "done", assigned_to: B, status: "completed", reward_points: 20, completed_at: at("2026-09-18") }),
+        challenge({ id: "old", assigned_to: B, status: "completed", reward_points: 99, completed_at: at("2026-08-01") }),
+        challenge({ id: "open", assigned_to: B, status: "active", reward_points: 50 }),
+      ],
+      redemptions: [
+        { id: "r1", reward_id: "x", redeemed_by: B, cost: 30, created_at: at("2026-09-18") },
+        { id: "r0", reward_id: "x", redeemed_by: B, cost: 500, created_at: at("2026-08-01") },
+      ],
+    });
+    expect(r.perUser[A]).toMatchObject({ chorePoints: 6, challengePoints: 0, earned: 6, spent: 0 });
+    expect(r.perUser[B]).toMatchObject({ chorePoints: 4, challengePoints: 20, earned: 24, spent: 30 });
+  });
+
+  it("rolling windows end today and include it", () => {
+    expect(timeframeStart("day", "2026-09-18")).toBe("2026-09-18");
+    expect(timeframeStart("week", "2026-09-18")).toBe("2026-09-12");
+    expect(timeframeStart("month", "2026-09-18")).toBe("2026-08-20");
+    expect(timeframeStart("1y", "2026-09-18")).toBe("2025-09-19");
+  });
+});
