@@ -35,19 +35,42 @@ jobs:
   migrate:
     runs-on: ubuntu-latest
     env:
-      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
       SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
-      SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
     steps:
-      - name: Check the Supabase secrets are set
+      - name: Check and tidy the Supabase secrets
         id: gate
+        env:
+          RAW_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          RAW_PROJECT: ${{ secrets.SUPABASE_PROJECT_ID }}
         run: |
-          if [ -z "$SUPABASE_ACCESS_TOKEN" ] || [ -z "$SUPABASE_DB_PASSWORD" ] || [ -z "$SUPABASE_PROJECT_ID" ]; then
+          if [ -z "$RAW_TOKEN" ] || [ -z "$SUPABASE_DB_PASSWORD" ] || [ -z "$RAW_PROJECT" ]; then
             echo "::warning title=Migrations NOT applied::Add SUPABASE_ACCESS_TOKEN, SUPABASE_DB_PASSWORD and SUPABASE_PROJECT_ID as repository secrets, then re-run this workflow."
             echo "ready=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "ready=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          # Copy/paste often adds a trailing newline, spaces or quote marks. Strip them.
+          token="$(printf '%s' "$RAW_TOKEN" | tr -d "[:space:]\"'")"
+          project="$(printf '%s' "$RAW_PROJECT" | tr -d "[:space:]\"'")"
+          echo "::add-mask::$token"
+
+          # Report only the SHAPE of each value (never its contents) so a wrong secret is easy to spot.
+          starts_ok=no; case "$token" in sbp_*) starts_ok=yes ;; esac
+          echo "Access token: ${#RAW_TOKEN} characters saved, ${#token} after tidying, starts with sbp_: $starts_ok (a real one is 44 characters)"
+          echo "Project id:   ${#RAW_PROJECT} characters saved, ${#project} after tidying (a real one is 20 lowercase letters)"
+
+          if ! printf '%s' "$token" | grep -Eq '^sbp_(oauth_)?[a-f0-9]{40}$'; then
+            echo "::error title=SUPABASE_ACCESS_TOKEN is not a valid access token::It must look like sbp_ followed by 40 letters/numbers. Create a new one at supabase.com/dashboard/account/tokens and save it as the SUPABASE_ACCESS_TOKEN secret. See the line above for what was found."
+            exit 1
+          fi
+          if ! printf '%s' "$project" | grep -Eq '^[a-z]{20}$'; then
+            echo "::error title=SUPABASE_PROJECT_ID is not a valid project id::It must be exactly the 20 lowercase letters of your project reference (not the URL). See the line above for what was found."
+            exit 1
+          fi
+
+          echo "SUPABASE_ACCESS_TOKEN=$token" >> "$GITHUB_ENV"
+          echo "SUPABASE_PROJECT_ID=$project" >> "$GITHUB_ENV"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         if: steps.gate.outputs.ready == 'true'
