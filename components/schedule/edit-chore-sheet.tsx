@@ -26,7 +26,9 @@ function EditForm({ instance, onClose }: { instance: ChoreInstance; onClose: () 
   const { me, partner, tone, actions } = useHousehold();
   const { toast } = useToast();
 
-  const inSeries = !!instance.parent_recurrence_id;
+  // A finished chore keeps the points and time it paid out; only name, day and assignee change.
+  const finished = instance.is_completed;
+  const inSeries = !finished && !!instance.parent_recurrence_id;
   const currentRepeat: RepeatChoice = inSeries ? frequencyFromRule(instance.recurrence_rule) : "none";
 
   const [title, setTitle] = useState(instance.title);
@@ -68,6 +70,12 @@ function EditForm({ instance, onClose }: { instance: ChoreInstance; onClose: () 
 
   return (
     <form onSubmit={submit} className="flex flex-col gap-5">
+      {finished && (
+        <p className="rounded-2xl bg-ok-soft px-4 py-3 text-sm font-semibold text-ok">
+          This chore is finished. Its {instance.points_assigned} points and logged time stay as they are. To change the
+          points, uncheck it first.
+        </p>
+      )}
       {inSeries && (
         <div className="flex flex-col gap-1.5">
           <span className="text-sm font-extrabold">Apply changes to</span>
@@ -99,13 +107,15 @@ function EditForm({ instance, onClose }: { instance: ChoreInstance; onClose: () 
         />
       </label>
 
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <p className="text-sm font-extrabold">Points</p>
-          <p className="text-xs text-muted">Earned when it&apos;s done</p>
+      {!finished && (
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-extrabold">Points</p>
+            <p className="text-xs text-muted">Earned when it&apos;s done</p>
+          </div>
+          <Stepper label="points" value={points} min={1} max={10} onChange={setPoints} />
         </div>
-        <Stepper label="points" value={points} min={1} max={10} onChange={setPoints} />
-      </div>
+      )}
 
       <label className="flex flex-col gap-1.5 text-sm font-extrabold">
         <span>
@@ -137,37 +147,39 @@ function EditForm({ instance, onClose }: { instance: ChoreInstance; onClose: () 
         </div>
       )}
 
-      <div className="flex flex-col gap-1.5">
-        <label htmlFor="repeat" className="text-sm font-extrabold">
-          Repeat
-        </label>
-        {repeatEditable ? (
-          <select
-            id="repeat"
-            value={repeat}
-            onChange={(e) => setRepeat(e.target.value as RepeatChoice)}
-            className={fieldClass}
-          >
-            {REPEAT_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        ) : (
-          <p id="repeat" className={`${fieldClass} flex items-center text-muted`}>
-            {REPEAT_OPTIONS.find((o) => o.value === currentRepeat)?.label ?? "Repeats"}
+      {!finished && (
+        <div className="flex flex-col gap-1.5">
+          <label htmlFor="repeat" className="text-sm font-extrabold">
+            Repeat
+          </label>
+          {repeatEditable ? (
+            <select
+              id="repeat"
+              value={repeat}
+              onChange={(e) => setRepeat(e.target.value as RepeatChoice)}
+              className={fieldClass}
+            >
+              {REPEAT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <p id="repeat" className={`${fieldClass} flex items-center text-muted`}>
+              {REPEAT_OPTIONS.find((o) => o.value === currentRepeat)?.label ?? "Repeats"}
+            </p>
+          )}
+          <p className="text-xs font-semibold text-muted" aria-live="polite">
+            {inSeries && scope === "future" && repeat === "none"
+              ? "This will be the last one. Later days are removed."
+              : inSeries && scope === "future" && repeat !== currentRepeat
+                ? `${describeRepeat(repeat, date)}. Later days are rebuilt from this one.`
+                : describeRepeat(effectiveRepeat, date)}
+            {inSeries && scope === "this" && ". Choose “This and future” to change how often."}
           </p>
-        )}
-        <p className="text-xs font-semibold text-muted" aria-live="polite">
-          {inSeries && scope === "future" && repeat === "none"
-            ? "This will be the last one. Later days are removed."
-            : inSeries && scope === "future" && repeat !== currentRepeat
-              ? `${describeRepeat(repeat, date)}. Later days are rebuilt from this one.`
-              : describeRepeat(effectiveRepeat, date)}
-          {inSeries && scope === "this" && ". Choose “This and future” to change how often."}
-        </p>
-      </div>
+        </div>
+      )}
 
       <button type="submit" disabled={busy || !title.trim() || !date} className={`${primaryButton} min-h-14 text-lg`}>
         {busy ? "Saving…" : "Save changes"}

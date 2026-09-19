@@ -6,7 +6,7 @@ Next.js (App Router) + Tailwind on Vercel, Supabase for Postgres, Auth and Realt
 ## Setup
 
 1. **Supabase project.** Create one, then apply the schema: paste each file in `supabase/migrations/` into the SQL editor,
-   **in order** (`0001_init.sql` … `0004_uncheck_chore.sql`), or use `supabase link` + `supabase db push`.
+   **in order** (`0001_init.sql` … `0005_edit_completed_chore.sql`), or use `supabase link` + `supabase db push`.
    Pushing code to GitHub never changes the database, so run any new migration file by hand.
 2. **Auth.** Email + password. If "Confirm email" is on, add `https://YOUR-DOMAIN/auth/callback` (and
    `http://localhost:3000/auth/callback`) under Authentication → URL Configuration.

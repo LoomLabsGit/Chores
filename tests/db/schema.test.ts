@@ -55,6 +55,7 @@ beforeAll(async () => {
   await db.exec(read("supabase/migrations/0002_remove_completed_chore.sql"));
   await db.exec(read("supabase/migrations/0003_recurring_chores.sql"));
   await db.exec(read("supabase/migrations/0004_uncheck_chore.sql"));
+  await db.exec(read("supabase/migrations/0005_edit_completed_chore.sql"));
   for (const id of [ALEX, BLAKE, CASEY, DREW]) {
     await admin(`insert into auth.users (id, email) values ($1, $2)`, [id, `${id}@example.com`]);
   }
@@ -640,5 +641,59 @@ describe("uncomplete_chore (uncheck)", () => {
     await expect(as(DREW, `select public.uncomplete_chore($1)`, [done])).rejects.toThrow(/not found/i);
     await expect(asAnon(`select public.uncomplete_chore($1)`, [done])).rejects.toThrow(/permission denied/);
     expect((await admin(`select is_completed from public.chore_instances where id = $1`, [done]))[0].is_completed).toBe(true);
+  });
+});
+
+describe("edit_completed_chore", () => {
+  const points = async (uid: string) =>
+    (await as(uid, `select points from public.profiles where id = $1`, [uid]))[0].points as number;
+
+  it("changes name, day and assignee but never the points or the logged time", async () => {
+    const id = await chore(ALEX, "Typo chore", 10, ALEX, "2026-09-10");
+    await as(ALEX, `select * from public.complete_chore($1, 30, 60)`, [id]); // Alex 6 pts/18m, Blake 4 pts/12m
+    const [a0, b0] = [await points(ALEX), await points(BLAKE)];
+    const before = (await admin(`select * from public.chore_completions where instance_id = $1`, [id]))[0];
+
+    await as(ALEX, `select public.edit_completed_chore($1, '  Fixed name  ', $2, '2026-09-11')`, [id, BLAKE]);
+
+    const [inst] = await admin(`select title, assigned_to, scheduled_date::text d, is_completed, points_assigned from public.chore_instances where id = $1`, [id]);
+    expect(inst).toEqual({ title: "Fixed name", assigned_to: BLAKE, d: "2026-09-11", is_completed: true, points_assigned: 10 });
+    expect(await points(ALEX)).toBe(a0);
+    expect(await points(BLAKE)).toBe(b0);
+    expect((await admin(`select * from public.chore_completions where instance_id = $1`, [id]))[0]).toEqual(before);
+  });
+
+  it("does not notify the partner that a finished chore was 'assigned' to them", async () => {
+    const id = await chore(ALEX, "Quiet fix", 4);
+    await as(ALEX, `select * from public.complete_chore($1, 5, 100)`, [id]);
+    const before = (await as(BLAKE, `select 1 from public.notifications where message like '%assigned you: Quiet fix%' or message like '%assigned you: Renamed quietly%'`)).length;
+    await as(ALEX, `select public.edit_completed_chore($1, 'Renamed quietly', $2, '2026-09-18')`, [id, BLAKE]);
+    const after = (await as(BLAKE, `select 1 from public.notifications where message like '%assigned you: Renamed quietly%'`)).length;
+    expect(after).toBe(0);
+    expect(before).toBe(0);
+  });
+
+  it("either partner can fix it; input is validated", async () => {
+    const id = await chore(ALEX, "Validate done", 2);
+    await as(ALEX, `select * from public.complete_chore($1, 5, 100)`, [id]);
+    await as(BLAKE, `select public.edit_completed_chore($1, 'Blake fixed', $2, '2026-09-18')`, [id, ALEX]);
+    await expect(as(ALEX, `select public.edit_completed_chore($1, '   ', $2, '2026-09-18')`, [id, ALEX])).rejects.toThrow(/name/);
+    await expect(as(ALEX, `select public.edit_completed_chore($1, 'x', $2, null)`, [id, ALEX])).rejects.toThrow(/day/);
+    await expect(as(ALEX, `select public.edit_completed_chore($1, 'x', $2, '2026-09-18')`, [id, DREW])).rejects.toThrow(/not in your household/);
+  });
+
+  it("refuses unfinished chores, other households and signed-out callers", async () => {
+    const open = await chore(ALEX, "Not done", 2);
+    await expect(as(ALEX, `select public.edit_completed_chore($1, 'x', $2, '2026-09-18')`, [open, ALEX])).rejects.toThrow(/not completed yet/);
+    const done = await chore(ALEX, "Private done", 2);
+    await as(ALEX, `select * from public.complete_chore($1, 5, 100)`, [done]);
+    await expect(as(DREW, `select public.edit_completed_chore($1, 'x', null, '2026-09-18')`, [done])).rejects.toThrow(/not found/i);
+    await expect(asAnon(`select public.edit_completed_chore($1, 'x', null, '2026-09-18')`, [done])).rejects.toThrow(/permission denied/);
+  });
+
+  it("direct updates of a completed chore are still blocked (the function is the only way)", async () => {
+    const id = await chore(ALEX, "Locked direct", 2);
+    await as(ALEX, `select * from public.complete_chore($1, 5, 100)`, [id]);
+    expect(await as(ALEX, `update public.chore_instances set title = 'sneaky' where id = $1 returning id`, [id])).toHaveLength(0);
   });
 });

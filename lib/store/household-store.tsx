@@ -583,9 +583,26 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
 
       async editChore(instance, edit) {
         const prev = stateRef.current.instances[instance.id];
-        if (!prev || prev.is_completed) return false;
+        if (!prev) return false;
         const title = edit.title.trim();
         if (!title) return false;
+
+        if (prev.is_completed) {
+          // Finished chores: name, day and assignee only. Points and logged time stay as paid out.
+          dispatch({ type: "instance", row: { ...prev, title, assigned_to: edit.assignedTo, scheduled_date: edit.date } });
+          const { error } = await supabase.rpc("edit_completed_chore", {
+            p_instance_id: prev.id,
+            p_title: title,
+            p_assigned_to: edit.assignedTo,
+            p_scheduled_date: edit.date,
+          });
+          if (error) {
+            dispatch({ type: "instance", row: prev });
+            return fail(error);
+          }
+          return true;
+        }
+
         const inSeries = !!prev.parent_recurrence_id;
 
         const patch = {

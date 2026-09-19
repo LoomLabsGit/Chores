@@ -18,8 +18,8 @@ const MENU_WIDTH = 184;
 
 /**
  * The "..." menu on a chore card. What it offers depends on the chore:
- * unfinished -> Edit, Delete; finished -> Uncheck, Delete. (Editing a finished chore would
- * change points that were already paid out, so it has to be unchecked first.)
+ * unfinished -> Edit, Delete; finished -> Edit, Uncheck, Delete. (Editing a finished chore
+ * changes its name, day and assignee only; its points stay as paid out unless it is unchecked.)
  * Rendered in a portal so it is never clipped by the card, column or bottom nav.
  */
 export function CardMenu({ instance, actions }: { instance: ChoreInstance; actions: CardActions }) {
@@ -29,6 +29,7 @@ export function CardMenu({ instance, actions }: { instance: ChoreInstance; actio
 
   const items: Item[] = instance.is_completed
     ? [
+        { key: "edit", label: "Edit", icon: "pencil", run: () => actions.onEdit(instance) },
         { key: "uncheck", label: "Uncheck", icon: "undo", run: () => actions.onUncheck(instance) },
         { key: "delete", label: "Delete", icon: "trash", danger: true, run: () => actions.onDelete(instance) },
       ]
