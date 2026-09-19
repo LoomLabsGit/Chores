@@ -68,7 +68,10 @@ in order (`0004_…`) and should be additive; a migration runs against live data
   unfinished copies and repeating chores (so later days follow); **category** stays in the library. Finished chores never have
   their logged time rewritten; a tax change re-prices them (see the ledger below) unless you untick that box. **Delete** archives the chore and stops it repeating; you choose whether its
   unfinished calendar copies go too (finished chores and earned points are always kept). Deleting moved out of the Add chore
-  sheet, which now links here. The "Common" row still matches by the six original names, so renaming one drops it from Common
+  sheet, which now links here. That sheet has the same search and quick category filters at the top (filtering swaps its
+  Recent / Common / All sections for one list of matches, with a "Create" shortcut when nothing matches). Categories are chosen
+  with a type-to-search picker that starts empty: open it with nothing typed for an alphabetical list, type to narrow it live,
+  and text that matches no category is offered as "Create ...". Left empty, a chore is filed under General. The "Common" row still matches by the six original names, so renaming one drops it from Common
   (it stays under Recent and All tasks).
 - **Dynamic ledger** (migration 0009): editing a finished chore (time logged, chore tax, split or who it is for) recalculates
   its total, works out each person's difference (new share minus old share) and credits or debits their balance straight away.

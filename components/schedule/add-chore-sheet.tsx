@@ -3,13 +3,23 @@
 import Link from "next/link";
 import { useState } from "react";
 import { formatLongDay } from "@/lib/logic/dates";
-import { allChoresAlphabetical, commonChores, recentChores } from "@/lib/logic/library";
+import {
+  allChoresAlphabetical,
+  commonChores,
+  filterLibrary,
+  libraryCategories,
+  recentChores,
+  resolveCategory,
+  titleTaken,
+} from "@/lib/logic/library";
 import { describeRepeat, REPEAT_OPTIONS, type RepeatChoice } from "@/lib/logic/recurrence";
 import { calculatePoints, ESTIMATE_STEPS, snapMinutes } from "@/lib/logic/points";
 import { useHousehold } from "@/lib/store/household-store";
 import type { ChoreLibraryItem } from "@/lib/types";
 import { Icon } from "../icons";
 import { useToast } from "../toast";
+import { CategoryChips } from "../ui/category-chips";
+import { CategoryCombobox } from "../ui/category-combobox";
 import { fieldClass, primaryButton } from "../ui/controls";
 import { AssigneeField, DurationField, RewardPreview, TaxField } from "../ui/points-controls";
 import { Modal } from "../ui/modal";
@@ -36,8 +46,10 @@ export function AddChoreSheet({ open, ...rest }: Props) {
 
 function Sheet({ date, onClose, onAdded }: Omit<Props, "open">) {
   const [draft, setDraft] = useState<Draft | null>(null);
-  // Remember a typed chore so "Back" does not lose it.
+  // Remember a typed chore and the search/filter so "Back" does not lose them.
   const [typed, setTyped] = useState("");
+  const [query, setQuery] = useState("");
+  const [category, setCategory] = useState<string | null>(null);
 
   return (
     <Modal
@@ -72,7 +84,18 @@ function Sheet({ date, onClose, onAdded }: Omit<Props, "open">) {
       {draft ? (
         <WhenWhoRepeat draft={draft} date={date} onClose={onClose} onAdded={onAdded} />
       ) : (
-        <Library onPick={(chore) => setDraft({ kind: "library", chore })} onManage={onClose} />
+        <Library
+          onPick={(chore) => setDraft({ kind: "library", chore })}
+          onCreate={(title) => {
+            setTyped(title);
+            setDraft({ kind: "new", title });
+          }}
+          onManage={onClose}
+          query={query}
+          onQuery={setQuery}
+          category={category}
+          onCategory={setCategory}
+        />
       )}
     </Modal>
   );
@@ -93,9 +116,37 @@ function Pill({ chore, onPick }: { chore: ChoreLibraryItem; onPick: (c: ChoreLib
   );
 }
 
-/** Step 1: choose from the library (or type a new chore in the docked input). */
-function Library({ onPick, onManage }: { onPick: (c: ChoreLibraryItem) => void; onManage: () => void }) {
+/**
+ * Step 1: choose from the library, with the same search and quick category filters as the Manage tab.
+ * Filtering swaps the Recent / Common / All sections for one list of matches. (A new chore can also be
+ * typed in the docked input.)
+ */
+function Library({
+  onPick,
+  onCreate,
+  onManage,
+  query,
+  onQuery,
+  category,
+  onCategory,
+}: {
+  onPick: (c: ChoreLibraryItem) => void;
+  onCreate: (title: string) => void;
+  onManage: () => void;
+  query: string;
+  onQuery: (q: string) => void;
+  category: string | null;
+  onCategory: (c: string | null) => void;
+}) {
   const { state } = useHousehold();
+
+  const categories = libraryCategories(state.library);
+  // A filter must not outlive the last chore in its category.
+  const activeCategory = category && categories.some((c) => c.toLowerCase() === category.toLowerCase()) ? category : null;
+  const searching = query.trim() !== "" || activeCategory !== null;
+  const results = searching ? filterLibrary(state.library, query, activeCategory) : [];
+  // Offered only when nothing matches: with matches on screen, picking one is what you are after.
+  const canCreate = results.length === 0 && query.trim() !== "" && !titleTaken(state.library, query);
 
   const recent = recentChores(state.library);
   const common = commonChores(state.library);
@@ -103,61 +154,105 @@ function Library({ onPick, onManage }: { onPick: (c: ChoreLibraryItem) => void; 
 
   return (
     <div className="flex flex-col gap-5">
-      <p className="text-sm font-semibold text-muted">Pick a chore, or type a new one below.</p>
+      {/* Pinned to the top of the sheet so it stays reachable while scrolling a long library. */}
+      <div className="sticky top-0 z-10 -mx-5 flex flex-col gap-2.5 bg-surface px-5 pb-2 pt-1">
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => onQuery(e.target.value)}
+          placeholder="Search chores"
+          aria-label="Search chores"
+          enterKeyHint="search"
+          className={fieldClass}
+        />
+        <CategoryChips categories={categories} value={activeCategory} onChange={onCategory} className="-mx-5 px-5" />
+      </div>
 
-      {recent.length > 0 && (
-        <section aria-labelledby="recent-h">
-          <h3 id="recent-h" className="mb-2 text-xs font-extrabold uppercase tracking-wide text-muted">
-            Recent
+      {searching ? (
+        <section aria-label="Search results" aria-live="polite" className="flex flex-col gap-3">
+          <h3 className="text-xs font-extrabold uppercase tracking-wide text-muted">
+            {results.length} {results.length === 1 ? "match" : "matches"}
           </h3>
-          <div className="no-scrollbar -mx-5 flex gap-2 overflow-x-auto px-5 pb-1">
-            {recent.map((c) => (
-              <Pill key={c.id} chore={c} onPick={onPick} />
-            ))}
-          </div>
+          {results.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {results.map((c) => (
+                <Pill key={c.id} chore={c} onPick={onPick} />
+              ))}
+            </div>
+          )}
+          {canCreate && (
+            <button
+              onClick={() => onCreate(query.trim())}
+              className="flex min-h-12 items-center gap-2 self-start rounded-2xl border border-dashed border-brand/50 px-4 text-left font-bold text-brand hover:bg-brand-soft"
+            >
+              <Icon name="plus" size={18} strokeWidth={2.6} />
+              <span className="min-w-0 truncate">Create &ldquo;{query.trim()}&rdquo; as a new chore</span>
+            </button>
+          )}
+          {results.length === 0 && !canCreate && (
+            <p className="rounded-2xl bg-raised px-4 py-6 text-center text-sm text-muted">
+              Nothing matches. Try a different search or category.
+            </p>
+          )}
         </section>
+      ) : (
+        <>
+          <p className="text-sm font-semibold text-muted">Pick a chore, or type a new one below.</p>
+
+          {recent.length > 0 && (
+            <section aria-labelledby="recent-h">
+              <h3 id="recent-h" className="mb-2 text-xs font-extrabold uppercase tracking-wide text-muted">
+                Recent
+              </h3>
+              <div className="no-scrollbar -mx-5 flex gap-2 overflow-x-auto px-5 pb-1">
+                {recent.map((c) => (
+                  <Pill key={c.id} chore={c} onPick={onPick} />
+                ))}
+              </div>
+            </section>
+          )}
+
+          {common.length > 0 && (
+            <section aria-labelledby="common-h">
+              <h3 id="common-h" className="mb-2 text-xs font-extrabold uppercase tracking-wide text-muted">
+                Common
+              </h3>
+              <div className="flex flex-wrap gap-2">
+                {common.map((c) => (
+                  <Pill key={c.id} chore={c} onPick={onPick} />
+                ))}
+              </div>
+            </section>
+          )}
+
+          <section aria-labelledby="all-h">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <h3 id="all-h" className="text-xs font-extrabold uppercase tracking-wide text-muted">
+                All tasks
+              </h3>
+              <Link
+                href="/manage"
+                onClick={onManage}
+                className="flex min-h-11 items-center gap-1.5 rounded-full px-3 text-sm font-bold text-brand hover:bg-brand-soft"
+              >
+                <Icon name="sliders" size={16} />
+                Manage chores
+              </Link>
+            </div>
+            {all.length === 0 ? (
+              <p className="rounded-2xl bg-raised px-4 py-6 text-center text-sm text-muted">
+                Your library is empty. Type a chore below to create your first one.
+              </p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {all.map((c) => (
+                  <Pill key={c.id} chore={c} onPick={onPick} />
+                ))}
+              </div>
+            )}
+          </section>
+        </>
       )}
-
-      {common.length > 0 && (
-        <section aria-labelledby="common-h">
-          <h3 id="common-h" className="mb-2 text-xs font-extrabold uppercase tracking-wide text-muted">
-            Common
-          </h3>
-          <div className="flex flex-wrap gap-2">
-            {common.map((c) => (
-              <Pill key={c.id} chore={c} onPick={onPick} />
-            ))}
-          </div>
-        </section>
-      )}
-
-      <section aria-labelledby="all-h">
-        <div className="mb-2 flex items-center justify-between gap-3">
-          <h3 id="all-h" className="text-xs font-extrabold uppercase tracking-wide text-muted">
-            All tasks
-          </h3>
-          <Link
-            href="/manage"
-            onClick={onManage}
-            className="flex min-h-11 items-center gap-1.5 rounded-full px-3 text-sm font-bold text-brand hover:bg-brand-soft"
-          >
-            <Icon name="sliders" size={16} />
-            Manage chores
-          </Link>
-        </div>
-        {all.length === 0 ? (
-          <p className="rounded-2xl bg-raised px-4 py-6 text-center text-sm text-muted">
-            Your library is empty. Type a chore below to create your first one.
-          </p>
-        ) : (
-          <div className="flex flex-wrap gap-2">
-            {all.map((c) => (
-              <Pill key={c.id} chore={c} onPick={onPick} />
-            ))}
-          </div>
-        )}
-      </section>
-
     </div>
   );
 }
@@ -207,13 +302,16 @@ function WhenWhoRepeat({
   onClose: () => void;
   onAdded: (date: string) => void;
 }) {
-  const { me, partner, tone, actions } = useHousehold();
+  const { me, partner, tone, state, actions } = useHousehold();
   const { toast } = useToast();
+  const categories = libraryCategories(state.library);
   const [day, setDay] = useState(date);
   const [assignee, setAssignee] = useState<string | null>(me.id);
   const [repeat, setRepeat] = useState<RepeatChoice>("none");
   const [minutes, setMinutes] = useState(draft.kind === "library" ? snapMinutes(draft.chore.default_duration) : 15);
   const [tax, setTax] = useState(draft.kind === "library" ? draft.chore.chore_tax : 0);
+  // Only a brand-new chore needs a category; one from the library already has its own.
+  const [category, setCategory] = useState("");
 
   const name = draft.kind === "library" ? draft.chore.title : draft.title;
 
@@ -226,7 +324,12 @@ function WhenWhoRepeat({
     const run =
       draft.kind === "library"
         ? actions.scheduleChore(draft.chore, day, assignee, { repeat, minutes, tax })
-        : actions.createAndScheduleChore({ title: draft.title, minutes, tax }, day, assignee, repeat);
+        : actions.createAndScheduleChore(
+            { title: draft.title, minutes, tax, category: resolveCategory(categories, category) },
+            day,
+            assignee,
+            repeat,
+          );
     void run.then(
       (ok) =>
         ok &&
@@ -242,6 +345,15 @@ function WhenWhoRepeat({
       <div className="rounded-2xl bg-raised p-4">
         <p className="text-lg font-extrabold leading-snug">{name}</p>
       </div>
+
+      {draft.kind === "new" && (
+        <div className="flex flex-col gap-1.5">
+          <label htmlFor="add-category" className="text-sm font-extrabold">
+            Category
+          </label>
+          <CategoryCombobox id="add-category" value={category} onChange={setCategory} categories={categories} />
+        </div>
+      )}
 
       <div className="flex flex-col gap-1.5">
         <label htmlFor="add-minutes" className="text-sm font-extrabold">

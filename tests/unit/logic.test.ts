@@ -15,9 +15,11 @@ import {
   commonChores,
   describePush,
   describeUsage,
+  categoryOptions,
   filterLibrary,
   libraryCategories,
   recentChores,
+  resolveCategory,
   titleTaken,
 } from "@/lib/logic/library";
 import { describeRepeat, frequencyFromRule, ordinal } from "@/lib/logic/recurrence";
@@ -553,5 +555,44 @@ describe("dynamic ledger", () => {
 
   it("formats differences with a real minus sign", () => {
     expect([formatDelta(3), formatDelta(-2), formatDelta(0)]).toEqual(["+3", "\u22122", "0"]);
+  });
+});
+
+describe("category picker logic", () => {
+  const cats = ["Laundry", "Kitchen", "Cleaning", "Garden", "Kitchen extras"];
+
+  it("with nothing typed, lists every category alphabetically and offers nothing to create", () => {
+    expect(categoryOptions(cats, "")).toEqual({
+      matches: ["Cleaning", "Garden", "Kitchen", "Kitchen extras", "Laundry"],
+      create: null,
+    });
+    expect(categoryOptions(cats, "   ").create).toBeNull();
+  });
+
+  it("narrows live as you type, starts-with matches first, then the rest alphabetically", () => {
+    expect(categoryOptions(cats, "k").matches).toEqual(["Kitchen", "Kitchen extras"]);
+    expect(categoryOptions(cats, "en").matches).toEqual(["Garden", "Kitchen", "Kitchen extras"]); // contains, none start with it
+    expect(categoryOptions(["Wash", "Dishwasher", "Aw"], "wa").matches).toEqual(["Wash", "Dishwasher"]); // prefix before contains
+  });
+
+  it("offers to create text that matches no category, but not one that exists (any case)", () => {
+    expect(categoryOptions(cats, "Pets")).toEqual({ matches: [], create: "Pets" });
+    expect(categoryOptions(cats, "  Pets  ").create).toBe("Pets");
+    expect(categoryOptions(cats, "kitch").create).toBe("kitch"); // partial: still a new name
+    expect(categoryOptions(cats, "kitchen")).toEqual({ matches: ["Kitchen", "Kitchen extras"], create: null });
+    expect(categoryOptions([], "Pets")).toEqual({ matches: [], create: "Pets" });
+    expect(categoryOptions([], "")).toEqual({ matches: [], create: null });
+  });
+
+  it("does not reorder the list it is given", () => {
+    const input = ["b", "a"];
+    categoryOptions(input, "");
+    expect(input).toEqual(["b", "a"]);
+  });
+
+  it("saves an existing category with its own spelling and anything else trimmed", () => {
+    expect(resolveCategory(cats, "  kitchen ")).toBe("Kitchen");
+    expect(resolveCategory(cats, " Pets ")).toBe("Pets");
+    expect(resolveCategory(cats, "   ")).toBe("");
   });
 });

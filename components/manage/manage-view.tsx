@@ -12,6 +12,7 @@ import { calculatePoints } from "@/lib/logic/points";
 import { useHousehold } from "@/lib/store/household-store";
 import type { ChoreLibraryItem } from "@/lib/types";
 import { Icon } from "../icons";
+import { CategoryChips } from "../ui/category-chips";
 import { EmptyState, fieldClass, primaryButton } from "../ui/controls";
 import { ChoreFormSheet } from "./chore-form-sheet";
 import { DeleteChoreSheet } from "./delete-chore-sheet";
@@ -78,26 +79,12 @@ export function ManageView() {
               aria-label="Search chores"
               className={fieldClass}
             />
-            {categories.length > 1 && (
-              <div role="radiogroup" aria-label="Filter by category" className="no-scrollbar -mx-4 flex gap-2 overflow-x-auto px-4 md:mx-0 md:flex-wrap md:px-0">
-                {[null, ...categories].map((c) => {
-                  const selected = (c ?? null) === activeCategory;
-                  return (
-                    <button
-                      key={c ?? "all"}
-                      role="radio"
-                      aria-checked={selected}
-                      onClick={() => setCategory(c)}
-                      className={`min-h-11 shrink-0 rounded-full px-4 text-sm font-bold transition-colors ${
-                        selected ? "bg-brand text-brand-ink" : "bg-raised text-ink"
-                      }`}
-                    >
-                      {c ?? "All"}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
+            <CategoryChips
+              categories={categories}
+              value={activeCategory}
+              onChange={setCategory}
+              className="-mx-4 px-4 md:mx-0 md:flex-wrap md:px-0"
+            />
             <p className="text-xs font-extrabold uppercase tracking-wide text-muted" aria-live="polite">
               {chores.length === total ? `${total} ${total === 1 ? "chore" : "chores"}` : `${chores.length} of ${total} chores`}
             </p>

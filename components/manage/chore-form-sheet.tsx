@@ -2,12 +2,11 @@
 
 import { useState } from "react";
 import {
-  CATEGORY_SUGGESTIONS,
   DEFAULT_CATEGORY,
   describePush,
   libraryCategories,
-  MAX_CATEGORY_LENGTH,
   NO_USAGE,
+  resolveCategory,
   titleTaken,
   type LibraryUsage,
 } from "@/lib/logic/library";
@@ -18,6 +17,7 @@ import type { ChoreLibraryItem } from "@/lib/types";
 import { Icon } from "../icons";
 import { useToast } from "../toast";
 import { fieldClass, primaryButton } from "../ui/controls";
+import { CategoryCombobox } from "../ui/category-combobox";
 import { Modal } from "../ui/modal";
 import { DurationField, RewardPreview, TaxField } from "../ui/points-controls";
 
@@ -54,7 +54,8 @@ function Form({
 
   const original = {
     title: chore?.title ?? "",
-    category: chore?.category?.trim() || DEFAULT_CATEGORY,
+    // A new chore starts with no category picked; an existing one shows the category it has.
+    category: chore ? chore.category?.trim() || DEFAULT_CATEGORY : "",
     minutes: chore ? snapMinutes(chore.default_duration) : 15,
     tax: chore?.chore_tax ?? 0,
   };
@@ -68,10 +69,10 @@ function Form({
   const name = title.trim();
   const taken = titleTaken(state.library, name, chore?.id);
   const changed =
-    !chore || name !== original.title || category.trim() !== original.category || minutes !== original.minutes || tax !== original.tax;
+    !chore || name !== original.title || (category.trim() || DEFAULT_CATEGORY) !== original.category || minutes !== original.minutes || tax !== original.tax;
   const canSave = !!name && !taken && changed && !busy;
 
-  const suggestions = [...new Set([...libraryCategories(state.library), ...CATEGORY_SUGGESTIONS])];
+  const categories = libraryCategories(state.library);
   const pushLines = chore
     ? describePush(
         { title: original.title, minutes: original.minutes, tax: original.tax },
@@ -87,7 +88,7 @@ function Form({
     e.preventDefault();
     if (!canSave) return;
     setBusy(true);
-    const input = { title: name, category: category.trim() || DEFAULT_CATEGORY, minutes, tax };
+    const input = { title: name, category: resolveCategory(categories, category) || DEFAULT_CATEGORY, minutes, tax };
     if (!chore) {
       const ok = await actions.createLibraryChore(input);
       setBusy(false);
@@ -137,22 +138,12 @@ function Form({
         )}
       </label>
 
-      <label className="flex flex-col gap-1.5 text-sm font-extrabold">
-        Category
-        <input
-          list="chore-categories"
-          maxLength={MAX_CATEGORY_LENGTH}
-          value={category}
-          onChange={(e) => setCategory(e.target.value)}
-          placeholder={DEFAULT_CATEGORY}
-          className={fieldClass}
-        />
-        <datalist id="chore-categories">
-          {suggestions.map((c) => (
-            <option key={c} value={c} />
-          ))}
-        </datalist>
-      </label>
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="manage-category" className="text-sm font-extrabold">
+          Category
+        </label>
+        <CategoryCombobox id="manage-category" value={category} onChange={setCategory} categories={categories} />
+      </div>
 
       <div className="flex flex-col gap-1.5">
         <label htmlFor="manage-minutes" className="text-sm font-extrabold">

@@ -50,8 +50,6 @@ export type LibraryUsage = {
 export const NO_USAGE: LibraryUsage = { open: 0, done: 0, repeating: 0 };
 
 export const DEFAULT_CATEGORY = "General";
-/** Offered as suggestions next to whatever categories already exist. */
-export const CATEGORY_SUGGESTIONS = ["Kitchen", "Cleaning", "Laundry", "Garden", "Pets", "Admin"] as const;
 export const MAX_CATEGORY_LENGTH = 30;
 
 const norm = (s: string) => s.trim().toLowerCase();
@@ -64,6 +62,33 @@ export function libraryCategories(library: ChoreLibraryItem[]): string[] {
     if (!seen.has(norm(name))) seen.set(norm(name), name);
   }
   return [...seen.values()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+}
+
+const alphabetical = (a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: "base" });
+
+/**
+ * What a category picker offers for what has been typed. With nothing typed it is every category,
+ * alphabetically. As you type the list reduces live (matches that start with the text first, then
+ * the rest, each alphabetical). `create` is the text to offer as a NEW category: only when something
+ * is typed and no existing category is exactly that (ignoring case).
+ */
+export function categoryOptions(categories: string[], typed: string): { matches: string[]; create: string | null } {
+  const q = norm(typed);
+  const matches = categories
+    .filter((c) => !q || norm(c).includes(q))
+    .sort((a, b) => {
+      const pa = q && norm(a).startsWith(q) ? 0 : 1;
+      const pb = q && norm(b).startsWith(q) ? 0 : 1;
+      return pa - pb || alphabetical(a, b);
+    });
+  const exists = categories.some((c) => norm(c) === q);
+  return { matches, create: q && !exists ? typed.trim() : null };
+}
+
+/** The category text to save: an existing category keeps its spelling ("kitchen" -> "Kitchen"), anything else is trimmed. */
+export function resolveCategory(categories: string[], typed: string): string {
+  const q = norm(typed);
+  return categories.find((c) => norm(c) === q) ?? typed.trim();
 }
 
 /** Live chores matching a search box and an optional category, alphabetical. */

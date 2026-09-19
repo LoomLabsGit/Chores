@@ -151,7 +151,13 @@ function reducer(state: State, action: Action): State {
 // Context
 // ---------------------------------------------------------------------------
 
-export type NewChore = { title: string; minutes: number; tax: number };
+export type NewChore = {
+  title: string;
+  minutes: number;
+  tax: number;
+  /** Optional; left empty it is filed under General. */
+  category?: string;
+};
 
 /** A library chore as edited on the Manage screen. */
 export type LibraryInput = { title: string; category: string; minutes: number; tax: number };
@@ -579,7 +585,7 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           id: libId,
           household_id: householdIdNow(),
           title,
-          category: "General",
+          category: input.category?.trim() || "General",
           default_duration: input.minutes,
           default_points: 5, // legacy column, unused
           chore_tax: input.tax,
@@ -592,6 +598,7 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           id: libId,
           household_id: lib.household_id,
           title,
+          category: input.category?.trim() || "General",
           default_duration: input.minutes,
           chore_tax: input.tax,
         });
