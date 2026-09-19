@@ -1,13 +1,21 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { clampMinutes, computeSplit, DURATION_STEPS } from "@/lib/logic/split";
+import { useState } from "react";
 import { formatLongDay } from "@/lib/logic/dates";
+import {
+  calculateBasePoints,
+  calculatePoints,
+  calculateSplit,
+  COMPLETION_STEPS,
+  estimatePoints,
+  snapMinutes,
+} from "@/lib/logic/points";
 import { useHousehold } from "@/lib/store/household-store";
 import type { ChoreInstance } from "@/lib/types";
 import { Icon } from "../icons";
 import { useToast } from "../toast";
-import { Avatar, fieldClass, primaryButton } from "../ui/controls";
+import { Avatar, primaryButton } from "../ui/controls";
+import { DurationField } from "../ui/points-controls";
 import { ConfirmDialog, Modal } from "../ui/modal";
 
 export function CompleteSheet({
@@ -38,30 +46,27 @@ function CompleteForm({
   const { me, partner, state, tone, nameOf, actions } = useHousehold();
   const { toast } = useToast();
 
-  const defaultMinutes = useMemo(
-    () => state.library.find((c) => c.id === instance.chore_id)?.default_duration ?? 15,
-    [state.library, instance.chore_id],
-  );
-  const [minutes, setMinutes] = useState(defaultMinutes);
+  // Starts at the estimate; the real time you log is what the points are worked out from.
+  const [minutes, setMinutes] = useState(snapMinutes(instance.estimated_duration));
   const [split, setSplit] = useState(false);
   const [myPct, setMyPct] = useState(50);
   const [busy, setBusy] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
 
   const pct = split ? myPct : 100;
-  const result = computeSplit(minutes, instance.points_assigned, pct);
+  const base = calculateBasePoints(minutes);
+  const total = calculatePoints(minutes, instance.chore_tax);
+  const result = calculateSplit(minutes, total, pct); // a = you, b = your partner
   const myTone = tone(me.id);
   const partnerTone = partner ? tone(partner.id) : myTone === "a" ? "b" : "a";
-
-  const bump = (delta: number) => setMinutes((m) => clampMinutes(m + delta));
 
   async function complete() {
     setBusy(true);
     onClose(); // optimistic: the card flips to done immediately
     const ok = await actions.completeChore(instance, minutes, pct);
     if (!ok) return;
-    if (result.me.points > 0) toast(`Nice work! +${result.me.points} pt${result.me.points === 1 ? "" : "s"}`, "points");
-    else if (partner) toast(`Logged. ${partner.display_name} earns ${result.partner.points} pts`, "success");
+    if (result.a.points > 0) toast(`Nice work! +${result.a.points} pt${result.a.points === 1 ? "" : "s"}`, "points");
+    else if (partner) toast(`Logged. ${partner.display_name} earns ${result.b.points} pts`, "success");
     else toast("Logged", "success");
   }
 
@@ -69,58 +74,18 @@ function CompleteForm({
     <div className="flex flex-col gap-5">
       <p className="-mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-semibold text-muted">
         <span className="flex items-center gap-1 text-gold">
-          <Icon name="star" size={14} />
-          {instance.points_assigned} pts
+          <Icon name="bolt" size={14} />
+          {estimatePoints(instance)} pts est.
         </span>
         <span>{formatLongDay(instance.scheduled_date)}</span>
-        <span>Assigned to {nameOf(instance.assigned_to)}</span>
+        <span>{instance.assigned_to ? `Assigned to ${nameOf(instance.assigned_to)}` : "Unassigned"}</span>
       </p>
 
       <section aria-labelledby="duration-label" className="flex flex-col gap-2.5">
-        <div className="flex items-end justify-between gap-3">
-          <label id="duration-label" htmlFor="duration" className="text-sm font-extrabold">
-            How long did it take?
-          </label>
-        </div>
-        <div className="flex items-center gap-3">
-          <input
-            id="duration"
-            type="number"
-            inputMode="numeric"
-            min={0}
-            max={1440}
-            value={minutes}
-            onChange={(e) => setMinutes(clampMinutes(e.target.valueAsNumber))}
-            onFocus={(e) => e.target.select()}
-            className={`${fieldClass} w-28 text-center text-2xl font-extrabold tabular-nums`}
-          />
-          <span className="text-base font-bold text-muted">minutes</span>
-        </div>
-        <div className="grid grid-cols-5 gap-2" role="group" aria-label="Subtract minutes">
-          {DURATION_STEPS.map((n) => (
-            <button
-              key={`m${n}`}
-              onClick={() => bump(-n)}
-              disabled={minutes === 0}
-              aria-label={`Subtract ${n} minute${n === 1 ? "" : "s"}`}
-              className="min-h-12 rounded-2xl bg-raised text-base font-extrabold text-ink active:scale-95 disabled:opacity-40"
-            >
-              &minus;{n}
-            </button>
-          ))}
-        </div>
-        <div className="grid grid-cols-5 gap-2" role="group" aria-label="Add minutes">
-          {DURATION_STEPS.map((n) => (
-            <button
-              key={`p${n}`}
-              onClick={() => bump(n)}
-              aria-label={`Add ${n} minute${n === 1 ? "" : "s"}`}
-              className="min-h-12 rounded-2xl bg-brand-soft text-base font-extrabold text-brand active:scale-95"
-            >
-              +{n}
-            </button>
-          ))}
-        </div>
+        <label id="duration-label" htmlFor="duration" className="text-sm font-extrabold">
+          How long did it take?
+        </label>
+        <DurationField inputId="duration" value={minutes} onChange={setMinutes} steps={COMPLETION_STEPS} label="Minutes taken" />
       </section>
 
       <section className="rounded-3xl border border-line p-4">
@@ -175,16 +140,42 @@ function CompleteForm({
                 <span className="max-w-full truncate text-[11px] font-bold text-muted">{partner.display_name}</span>
               </div>
             </div>
-            <p className="text-center text-[13px] font-bold leading-snug" aria-live="polite">
-              <span>
-                {me.display_name}: {result.me.pct}% ({result.me.minutes}m, {result.me.points} pts)
-              </span>
-              <span className="mx-1.5 text-muted">|</span>
-              <span>
-                {partner.display_name}: {result.partner.pct}% ({result.partner.minutes}m, {result.partner.points} pts)
-              </span>
-            </p>
           </div>
+        )}
+      </section>
+
+      <section aria-label="Points breakdown" className="rounded-3xl border border-line bg-raised p-4 text-[15px]">
+        <div className="flex items-baseline justify-between gap-3">
+          <span className="font-bold text-muted">Logged: {minutes} mins</span>
+          <span className="font-extrabold tabular-nums">{base} Base Pts</span>
+        </div>
+        <div className="mt-1.5 flex items-baseline justify-between gap-3">
+          <span className="font-bold text-muted">Chore Tax:</span>
+          <span className="font-extrabold tabular-nums">+{instance.chore_tax} Pts</span>
+        </div>
+        <div className="mt-2.5 flex items-baseline justify-between gap-3 border-t border-line pt-2.5">
+          <span className="font-extrabold">Total Reward:</span>
+          <span className="text-lg font-extrabold tabular-nums text-gold" aria-live="polite">
+            {total} Points
+          </span>
+        </div>
+        {split && partner && (
+          <ul className="mt-3 flex flex-col gap-1.5 border-t border-line pt-3 text-sm font-bold" aria-live="polite">
+            <li className="flex items-center justify-between gap-3">
+              <span className="flex items-center gap-2">
+                <Avatar name={me.display_name} tone={myTone} size={20} />
+                {me.display_name} ({result.a.pct}%): {result.a.minutes} mins
+              </span>
+              <span className="tabular-nums">&rarr; {result.a.points} pts</span>
+            </li>
+            <li className="flex items-center justify-between gap-3">
+              <span className="flex items-center gap-2">
+                <Avatar name={partner.display_name} tone={partnerTone} size={20} />
+                {partner.display_name} ({result.b.pct}%): {result.b.minutes} mins
+              </span>
+              <span className="tabular-nums">&rarr; {result.b.points} pts</span>
+            </li>
+          </ul>
         )}
       </section>
 
@@ -192,7 +183,7 @@ function CompleteForm({
         <button onClick={complete} disabled={busy} className={`${primaryButton} min-h-14 w-full text-lg`}>
           <Icon name="check" strokeWidth={3} />
           Complete
-          {!split && <span className="opacity-80">· +{instance.points_assigned} pts</span>}
+          <span className="opacity-80">· +{result.a.points} pts</span>
         </button>
         <div className="grid grid-cols-2 gap-2">
           <button

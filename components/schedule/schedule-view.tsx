@@ -31,6 +31,7 @@ import { Icon } from "../icons";
 import { useToast } from "../toast";
 import { Avatar, EmptyState, TONE_SOFT } from "../ui/controls";
 import { AddChoreSheet } from "./add-chore-sheet";
+import { ClaimSheet } from "./claim-sheet";
 import { DateSheet } from "./date-sheet";
 import { CardActions } from "./card-menu";
 import { ChoreCard, ChoreCardView } from "./chore-card";
@@ -55,6 +56,7 @@ export function ScheduleView() {
   const [addOpen, setAddOpen] = useState(false);
   const [addDate, setAddDate] = useState(today);
   const [dating, setDating] = useState<ChoreInstance | null>(null);
+  const [claiming, setClaiming] = useState<ChoreInstance | null>(null);
   const [completing, setCompleting] = useState<ChoreInstance | null>(null);
   const [removing, setRemoving] = useState<ChoreInstance | null>(null);
   const [editing, setEditing] = useState<ChoreInstance | null>(null);
@@ -111,6 +113,9 @@ export function ScheduleView() {
 
   const selectedList = byDate[selected] ?? [];
 
+  /** Tapping a card: unassigned chores open the Claim sheet, everything else the completion sheet. */
+  const openCard = (inst: ChoreInstance) => (inst.assigned_to === null ? setClaiming(inst) : setCompleting(inst));
+
   /** Opens the Add Chore sheet on a specific day (the "+" on a day) and selects that day. */
   function openAdd(date: string) {
     setSelected(date);
@@ -158,7 +163,7 @@ export function ScheduleView() {
                 instances={byDate[d]}
                 onSelect={() => setSelected(d)}
                 onAdd={() => openAdd(d)}
-                onOpen={setCompleting}
+                onOpen={openCard}
                 actions={cardActions}
               />
             ))}
@@ -206,7 +211,7 @@ export function ScheduleView() {
                 </EmptyState>
               ) : (
                 selectedList.map((inst) => (
-                  <ChoreCard key={inst.id} instance={inst} overdue={inst.scheduled_date < today} onOpen={setCompleting} actions={cardActions} />
+                  <ChoreCard key={inst.id} instance={inst} overdue={inst.scheduled_date < today} onOpen={openCard} actions={cardActions} />
                 ))
               )}
             </section>
@@ -251,6 +256,7 @@ export function ScheduleView() {
         }}
       />
       <EditChoreSheet instance={editing} onClose={() => setEditing(null)} />
+      <ClaimSheet instance={claiming} onClose={() => setClaiming(null)} onCompleteNow={setCompleting} />
       <ConfirmDialog
         open={!!removing}
         title={removing?.is_completed ? "Delete completed chore?" : "Delete this chore?"}

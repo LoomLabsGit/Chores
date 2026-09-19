@@ -12,7 +12,16 @@ import {
 } from "@/lib/logic/dates";
 import { allChoresAlphabetical, commonChores, recentChores } from "@/lib/logic/library";
 import { describeRepeat, frequencyFromRule, ordinal } from "@/lib/logic/recurrence";
-import { clampMinutes, computeSplit, formatMinutes, share } from "@/lib/logic/split";
+import {
+  calculateBasePoints,
+  calculatePoints,
+  calculateSplit,
+  clampTax,
+  describeReward,
+  estimatePoints,
+  snapMinutes,
+} from "@/lib/logic/points";
+import { formatMinutes } from "@/lib/logic/split";
 import { computeStats, timeframeStart } from "@/lib/logic/stats";
 import type {
   AppNotification,
@@ -54,43 +63,90 @@ describe("dates", () => {
   });
 });
 
+describe("time-based points", () => {
+  it("earns 12 points an hour: 1 base point per 5 minutes, minimum 1", () => {
+    expect(calculateBasePoints(5)).toBe(1);
+    expect(calculateBasePoints(15)).toBe(3);
+    expect(calculateBasePoints(60)).toBe(12);
+    expect(calculateBasePoints(90)).toBe(18);
+  });
+
+  it("adds the chore tax as a flat bonus, whatever the duration", () => {
+    expect(calculatePoints(25, 4)).toBe(9); // 5 base + 4 tax (the spec's example)
+    expect(calculatePoints(5, 6)).toBe(7);
+    expect(calculatePoints(60, 6)).toBe(18);
+    expect(calculatePoints(15, 0)).toBe(3);
+  });
+
+  it("estimates a scheduled chore's bounty from its estimate and tax", () => {
+    expect(estimatePoints({ estimated_duration: 15, chore_tax: 5 })).toBe(8);
+    expect(estimatePoints({ estimated_duration: 30, chore_tax: 0 })).toBe(6);
+  });
+
+  it("words the live reward preview as specified", () => {
+    expect(describeReward(15, 5)).toBe("Est. Reward: 15 mins (3 pts) + Tax (5 pts) = 8 pts");
+  });
+
+  it("snaps durations to multiples of 5, from 5 to 1440", () => {
+    expect(snapMinutes(0)).toBe(5);
+    expect(snapMinutes(-20)).toBe(5);
+    expect(snapMinutes(7)).toBe(5);
+    expect(snapMinutes(8)).toBe(10);
+    expect(snapMinutes(45)).toBe(45);
+    expect(snapMinutes(99999)).toBe(1440);
+    expect(snapMinutes(Number.NaN)).toBe(5);
+  });
+
+  it("keeps the tax between 0 and 50", () => {
+    expect(clampTax(-3)).toBe(0);
+    expect(clampTax(7.4)).toBe(7);
+    expect(clampTax(500)).toBe(50);
+    expect(clampTax(Number.NaN)).toBe(0);
+  });
+});
+
 describe("split maths", () => {
-  it("matches the spec's example: 60/40 of 30 min and 10 pts", () => {
-    const s = computeSplit(30, 10, 60);
-    expect(s.me).toEqual({ pct: 60, minutes: 18, points: 6 });
-    expect(s.partner).toEqual({ pct: 40, minutes: 12, points: 4 });
+  it("matches the spec's receipt: 25 min + tax 4 = 9 pts, split 60/40", () => {
+    const s = calculateSplit(25, calculatePoints(25, 4), 60);
+    expect(s.a).toEqual({ pct: 60, minutes: 15, points: 5 });
+    expect(s.b).toEqual({ pct: 40, minutes: 10, points: 4 });
   });
 
-  it("uses round-to-nearest on each side independently (ties round up)", () => {
-    expect(share(5, 50)).toBe(3); // 2.5 -> 3
-    expect(share(3, 50)).toBe(2); // 1.5 -> 2
-    expect(share(15, 30)).toBe(5); // 4.5 -> 5
-    expect(share(7, 10)).toBe(1); // 0.7 -> 1
-    expect(share(4, 10)).toBe(0); // 0.4 -> 0
-    const s = computeSplit(5, 5, 50);
-    expect(s.me.points + s.partner.points).toBe(6);
+  it("matches the earlier example: 60/40 of 30 min and 10 pts", () => {
+    const s = calculateSplit(30, 10, 60);
+    expect(s.a).toEqual({ pct: 60, minutes: 18, points: 6 });
+    expect(s.b).toEqual({ pct: 40, minutes: 12, points: 4 });
   });
 
-  it("only ever produces whole numbers", () => {
-    for (let total = 0; total <= 120; total++) {
+  it("rounds A's share (ties up) and gives B the remainder, so the parts always add up", () => {
+    expect(calculateSplit(5, 5, 50).a).toMatchObject({ minutes: 3, points: 3 }); // 2.5 -> 3
+    expect(calculateSplit(5, 5, 50).b).toMatchObject({ minutes: 2, points: 2 }); // remainder, not another 3
+    expect(calculateSplit(15, 7, 30).a.points).toBe(2); // 2.1 -> 2
+    expect(calculateSplit(15, 7, 30).b.points).toBe(5);
+  });
+
+  it("always sums exactly to the totals, with whole numbers, for every duration and split", () => {
+    for (let minutes = 5; minutes <= 240; minutes += 5) {
       for (let pct = 0; pct <= 100; pct += 10) {
-        const s = computeSplit(total, 7, pct);
-        for (const n of [s.me.minutes, s.me.points, s.partner.minutes, s.partner.points]) {
+        const total = calculatePoints(minutes, 3);
+        const s = calculateSplit(minutes, total, pct);
+        expect(s.a.minutes + s.b.minutes).toBe(minutes);
+        expect(s.a.points + s.b.points).toBe(total);
+        for (const n of [s.a.minutes, s.a.points, s.b.minutes, s.b.points]) {
           expect(Number.isInteger(n)).toBe(true);
+          expect(n).toBeGreaterThanOrEqual(0);
         }
       }
     }
   });
 
   it("handles the extremes", () => {
-    expect(computeSplit(20, 8, 100).partner).toEqual({ pct: 0, minutes: 0, points: 0 });
-    expect(computeSplit(20, 8, 0).me).toEqual({ pct: 0, minutes: 0, points: 0 });
+    expect(calculateSplit(20, 8, 100).b).toEqual({ pct: 0, minutes: 0, points: 0 });
+    expect(calculateSplit(20, 8, 0).a).toEqual({ pct: 0, minutes: 0, points: 0 });
+    expect(calculateSplit(20, 8, 0).b).toEqual({ pct: 100, minutes: 20, points: 8 });
   });
 
-  it("clamps and formats durations", () => {
-    expect(clampMinutes(-5)).toBe(0);
-    expect(clampMinutes(99999)).toBe(1440);
-    expect(clampMinutes(Number.NaN)).toBe(0);
+  it("formats durations", () => {
     expect(formatMinutes(0)).toBe("0m");
     expect(formatMinutes(45)).toBe("45m");
     expect(formatMinutes(60)).toBe("1h");
@@ -105,6 +161,7 @@ const lib = (over: Partial<ChoreLibraryItem>): ChoreLibraryItem => ({
   category: "General",
   default_duration: 15,
   default_points: 5,
+  chore_tax: 0,
   is_archived: false,
   last_used_at: null,
   created_at: "2026-01-01T00:00:00Z",

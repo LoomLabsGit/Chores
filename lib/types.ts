@@ -23,7 +23,10 @@ export type ChoreLibraryItem = {
   title: string;
   category: string;
   default_duration: number;
+  /** LEGACY: superseded by time + chore_tax. Kept for old rows; nothing reads it. */
   default_points: number;
+  /** Flat bonus points for dirty or unpleasant jobs (0-50). */
+  chore_tax: number;
   is_archived: boolean;
   last_used_at: string | null;
   created_at: string;
@@ -41,7 +44,11 @@ export type ChoreInstance = {
   is_recurring: boolean;
   recurrence_rule: string | null;
   parent_recurrence_id: string | null;
+  /** LEGACY: superseded by estimated_duration + chore_tax. Kept for old rows; nothing reads it. */
   points_assigned: number;
+  /** Estimated minutes (multiple of 5). Points are worked out from this until the real time is logged. */
+  estimated_duration: number;
+  chore_tax: number;
 };
 
 export type ChoreCompletion = {

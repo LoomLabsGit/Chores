@@ -14,7 +14,7 @@ import type { RealtimePostgresChangesPayload } from "@supabase/supabase-js";
 import { useToast } from "@/components/toast";
 import { friendlyError } from "@/lib/errors";
 import { getSupabase } from "@/lib/supabase/client";
-import { computeSplit } from "@/lib/logic/split";
+import { calculatePoints, calculateSplit } from "@/lib/logic/points";
 import { addDays, parseISODate } from "@/lib/logic/dates";
 import type { RepeatChoice } from "@/lib/logic/recurrence";
 import { uuid } from "@/lib/uuid";
@@ -150,11 +150,23 @@ function reducer(state: State, action: Action): State {
 // Context
 // ---------------------------------------------------------------------------
 
-export type NewChore = { title: string; points: number; minutes: number };
+export type NewChore = { title: string; minutes: number; tax: number };
+
+/** Fields that can be changed on an unfinished chore without a special server function. */
+export type InstancePatch = Partial<
+  Pick<ChoreInstance, "scheduled_date" | "assigned_to" | "estimated_duration" | "chore_tax">
+>;
+
+/** Optional overrides when scheduling a library chore (defaults come from the library entry). */
+export type ScheduleOptions = { repeat?: RepeatChoice; minutes?: number; tax?: number };
 
 export type ChoreEdit = {
   title: string;
-  points: number;
+  /** Estimated minutes (a multiple of 5). Points follow from this plus the tax. */
+  minutes: number;
+  /** Flat chore tax, 0-50. */
+  tax: number;
+  /** null = unassigned (the open pool). */
   assignedTo: string | null;
   date: string;
   repeat: RepeatChoice;
@@ -166,9 +178,9 @@ export type StatsData = { completions: ChoreCompletion[]; instances: ChoreInstan
 
 export type Actions = {
   loadWeek: (from: string, to: string) => Promise<void>;
-  moveInstance: (id: string, patch: { scheduled_date?: string; assigned_to?: string | null }) => Promise<boolean>;
-  scheduleChore: (chore: ChoreLibraryItem, date: string, assignedTo: string, repeat?: RepeatChoice) => Promise<boolean>;
-  createAndScheduleChore: (chore: NewChore, date: string, assignedTo: string, repeat?: RepeatChoice) => Promise<boolean>;
+  moveInstance: (id: string, patch: InstancePatch) => Promise<boolean>;
+  scheduleChore: (chore: ChoreLibraryItem, date: string, assignedTo: string | null, opts?: ScheduleOptions) => Promise<boolean>;
+  createAndScheduleChore: (chore: NewChore, date: string, assignedTo: string | null, repeat?: RepeatChoice) => Promise<boolean>;
   archiveChore: (id: string) => Promise<boolean>;
   removeInstance: (id: string) => Promise<boolean>;
   editChore: (instance: ChoreInstance, edit: ChoreEdit) => Promise<boolean>;
@@ -441,7 +453,10 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
         return true;
       },
 
-      async scheduleChore(chore, date, assignedTo, repeat = "none") {
+      async scheduleChore(chore, date, assignedTo, opts = {}) {
+        const repeat = opts.repeat ?? "none";
+        const minutes = opts.minutes ?? chore.default_duration;
+        const tax = opts.tax ?? chore.chore_tax;
         const id = uuid();
         const row: ChoreInstance = {
           id,
@@ -455,7 +470,9 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           is_recurring: false,
           recurrence_rule: null,
           parent_recurrence_id: null,
-          points_assigned: chore.default_points,
+          points_assigned: 5, // legacy column, unused
+          estimated_duration: minutes,
+          chore_tax: tax,
         };
         pendingInsertsRef.current.add(id);
         dispatch({ type: "instance", row });
@@ -467,7 +484,8 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           household_id: row.household_id,
           assigned_to: assignedTo,
           scheduled_date: date,
-          points_assigned: chore.default_points,
+          estimated_duration: minutes,
+          chore_tax: tax,
         });
         pendingInsertsRef.current.delete(id);
         if (error) {
@@ -493,11 +511,12 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
       async createAndScheduleChore(input, date, assignedTo, repeat = "none") {
         const title = input.title.trim();
         if (!title) return false;
+        const opts: ScheduleOptions = { repeat, minutes: input.minutes, tax: input.tax };
         // Re-use an existing library chore with the same name instead of duplicating it.
         const existing = stateRef.current.library.find(
           (c) => !c.is_archived && c.title.toLowerCase() === title.toLowerCase(),
         );
-        if (existing) return api.scheduleChore(existing, date, assignedTo, repeat);
+        if (existing) return api.scheduleChore(existing, date, assignedTo, opts);
 
         const libId = uuid();
         const lib: ChoreLibraryItem = {
@@ -506,7 +525,8 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           title,
           category: "General",
           default_duration: input.minutes,
-          default_points: input.points,
+          default_points: 5, // legacy column, unused
+          chore_tax: input.tax,
           is_archived: false,
           last_used_at: new Date().toISOString(),
           created_at: new Date().toISOString(),
@@ -517,13 +537,13 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           household_id: lib.household_id,
           title,
           default_duration: input.minutes,
-          default_points: input.points,
+          chore_tax: input.tax,
         });
         if (error) {
           dispatch({ type: "remove", key: "library", id: libId });
           return fail(error);
         }
-        return api.scheduleChore(lib, date, assignedTo, repeat);
+        return api.scheduleChore(lib, date, assignedTo, opts);
       },
 
       async archiveChore(id) {
@@ -620,7 +640,8 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
 
         const patch = {
           title,
-          points_assigned: edit.points,
+          estimated_duration: edit.minutes,
+          chore_tax: edit.tax,
           assigned_to: edit.assignedTo,
           scheduled_date: edit.date,
         };
@@ -636,7 +657,8 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           ({ error: rpcError } = await supabase.rpc("update_chore_series", {
             p_instance_id: prev.id,
             p_title: title,
-            p_points: edit.points,
+            p_duration: edit.minutes,
+            p_tax: edit.tax,
             p_assigned_to: edit.assignedTo,
             p_frequency: edit.repeat,
           }));
@@ -659,7 +681,8 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
       async completeChore(instance, minutes, myPercent) {
         const s = stateRef.current;
         const other = s.members.find((m) => m.id !== userId);
-        const split = computeSplit(minutes, instance.points_assigned, myPercent);
+        const totalPoints = calculatePoints(minutes, instance.chore_tax);
+        const split = calculateSplit(minutes, totalPoints, myPercent);
         const now = new Date().toISOString();
 
         const optimisticCompletion: ChoreCompletion = {
@@ -667,17 +690,21 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           instance_id: instance.id,
           total_duration_minutes: minutes,
           user_a_id: userId,
-          user_a_duration: split.me.minutes,
-          user_a_points: split.me.points,
+          user_a_duration: split.a.minutes,
+          user_a_points: split.a.points,
           user_b_id: other?.id ?? userId,
-          user_b_duration: split.partner.minutes,
-          user_b_points: split.partner.points,
+          user_b_duration: split.b.minutes,
+          user_b_points: split.b.points,
           created_at: now,
         };
-        dispatch({ type: "instance", row: { ...instance, is_completed: true, completed_at: now } });
+        // Completing an unassigned chore claims it for whoever completes it.
+        dispatch({
+          type: "instance",
+          row: { ...instance, is_completed: true, completed_at: now, assigned_to: instance.assigned_to ?? userId },
+        });
         dispatch({ type: "completion", row: optimisticCompletion });
-        dispatch({ type: "points", userId, delta: split.me.points });
-        if (other) dispatch({ type: "points", userId: other.id, delta: split.partner.points });
+        dispatch({ type: "points", userId, delta: split.a.points });
+        if (other) dispatch({ type: "points", userId: other.id, delta: split.b.points });
 
         const { data, error } = await supabase.rpc("complete_chore", {
           p_instance_id: instance.id,

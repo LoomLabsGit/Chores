@@ -38,12 +38,15 @@ async function asAnon<T extends Row = Row>(sql: string, params: unknown[] = []) 
 const admin = async <T extends Row = Row>(sql: string, params: unknown[] = []) =>
   (await db.query<T>(sql, params)).rows;
 
-async function chore(user: string, title: string, points = 5, assignedTo = user, date = "2026-09-18") {
+/** Schedules a chore. `tax` is the flat chore tax; `minutes` the estimate (points come from time + tax). */
+async function chore(
+  user: string, title: string, tax = 0, assignedTo: string | null = user, date = "2026-09-18", minutes = 15,
+) {
   const [row] = await as<{ id: string }>(
     user,
-    `insert into public.chore_instances (title, household_id, assigned_to, scheduled_date, points_assigned)
-     values ($1, public.current_household_id(), $2, $3, $4) returning id`,
-    [title, assignedTo, date, points],
+    `insert into public.chore_instances (title, household_id, assigned_to, scheduled_date, estimated_duration, chore_tax)
+     values ($1, public.current_household_id(), $2, $3, $5, $4) returning id`,
+    [title, assignedTo, date, tax, minutes],
   );
   return row.id;
 }
@@ -56,6 +59,7 @@ beforeAll(async () => {
   await db.exec(read("supabase/migrations/0003_recurring_chores.sql"));
   await db.exec(read("supabase/migrations/0004_uncheck_chore.sql"));
   await db.exec(read("supabase/migrations/0005_edit_completed_chore.sql"));
+  await db.exec(read("supabase/migrations/0006_time_based_points.sql"));
   for (const id of [ALEX, BLAKE, CASEY, DREW]) {
     await admin(`insert into auth.users (id, email) values ($1, $2)`, [id, `${id}@example.com`]);
   }
@@ -192,14 +196,16 @@ describe("chore scheduling", () => {
     expect(await as(ALEX, `select 1 from public.chore_instances where id = $1`, [id])).toHaveLength(1);
   });
 
-  it("rejects out-of-range points", async () => {
-    await expect(chore(ALEX, "Huge", 11)).rejects.toThrow(/check constraint/);
+  it("rejects an out-of-range tax or a duration that is not a multiple of 5", async () => {
+    await expect(chore(ALEX, "Huge tax", 51)).rejects.toThrow(/check constraint/);
+    await expect(chore(ALEX, "Odd minutes", 0, ALEX, "2026-09-18", 7)).rejects.toThrow(/check constraint/);
+    await expect(chore(ALEX, "Too short", 0, ALEX, "2026-09-18", 0)).rejects.toThrow(/check constraint/);
   });
 });
 
 describe("complete_chore", () => {
   it("solo completion credits the caller 100%", async () => {
-    const id = await chore(ALEX, "Solo", 8);
+    const id = await chore(ALEX, "Solo", 2); // 30 min = 6 base + 2 tax = 8
     const [c] = await as(ALEX, `select * from public.complete_chore($1, 30, 100)`, [id]);
     expect(c).toMatchObject({
       total_duration_minutes: 30, user_a_id: ALEX, user_a_duration: 30, user_a_points: 8,
@@ -213,7 +219,7 @@ describe("complete_chore", () => {
   it("splits minutes and points 60/40 and credits both balances", async () => {
     const [before] = await as(ALEX, `select (select points from public.profiles where id = $1) as a,
                                             (select points from public.profiles where id = $2) as b`, [ALEX, BLAKE]);
-    const id = await chore(ALEX, "Split", 10);
+    const id = await chore(ALEX, "Split", 4); // 30 min = 6 base + 4 tax = 10
     const [c] = await as(ALEX, `select * from public.complete_chore($1, 30, 60)`, [id]);
     expect(c).toMatchObject({ user_a_duration: 18, user_a_points: 6, user_b_duration: 12, user_b_points: 4 });
     const [after] = await as(ALEX, `select (select points from public.profiles where id = $1) as a,
@@ -225,16 +231,28 @@ describe("complete_chore", () => {
     expect(note.message).toBe("Alex completed: Split (you earned 4 pts)");
   });
 
-  it("uses the spec's round-to-nearest rule on both sides (5 pts 50/50 -> 3 + 3)", async () => {
-    const id = await chore(ALEX, "Odd", 5);
+  it("rounds the caller's share and gives the partner the remainder (5 pts 50/50 -> 3 + 2)", async () => {
+    const id = await chore(ALEX, "Odd", 4); // 5 min = 1 base + 4 tax = 5
     const [c] = await as(ALEX, `select * from public.complete_chore($1, 5, 50)`, [id]);
-    expect(c).toMatchObject({ user_a_points: 3, user_b_points: 3, user_a_duration: 3, user_b_duration: 3 });
+    expect(c).toMatchObject({ user_a_points: 3, user_b_points: 2, user_a_duration: 3, user_b_duration: 2 });
+  });
+
+  it("the two shares always add up to exactly the total, for every duration and split", async () => {
+    // totals of 4, 5 (odd: the case naive rounding gets wrong), 6, 8 and 10
+    for (const minutes of [5, 10, 15, 25, 35]) {
+      for (const pct of [10, 30, 50, 70, 90]) {
+        const id = await chore(ALEX, `Sum ${minutes}/${pct}`, 3);
+        const [c] = await as(ALEX, `select * from public.complete_chore($1, $2, $3)`, [id, minutes, pct]);
+        expect(c.user_a_points + c.user_b_points).toBe(minutes / 5 + 3);
+        expect(c.user_a_duration + c.user_b_duration).toBe(minutes);
+      }
+    }
   });
 
   it("a 0% share is valid (partner did it all)", async () => {
-    const id = await chore(ALEX, "Partner did it", 4);
+    const id = await chore(ALEX, "Partner did it", 4); // 20 min = 4 base + 4 tax = 8
     const [c] = await as(ALEX, `select * from public.complete_chore($1, 20, 0)`, [id]);
-    expect(c).toMatchObject({ user_a_points: 0, user_b_points: 4, user_a_duration: 0, user_b_duration: 20 });
+    expect(c).toMatchObject({ user_a_points: 0, user_b_points: 8, user_a_duration: 0, user_b_duration: 20 });
   });
 
   it("rejects double completion, bad splits, bad durations and foreign chores", async () => {
@@ -245,6 +263,9 @@ describe("complete_chore", () => {
     const id2 = await chore(ALEX, "Bad");
     await expect(as(ALEX, `select * from public.complete_chore($1, 5, 55)`, [id2])).rejects.toThrow(/multiple of 10/);
     await expect(as(ALEX, `select * from public.complete_chore($1, -1, 100)`, [id2])).rejects.toThrow(/Duration/);
+    await expect(as(ALEX, `select * from public.complete_chore($1, 0, 100)`, [id2])).rejects.toThrow(/multiple of 5/);
+    await expect(as(ALEX, `select * from public.complete_chore($1, 7, 100)`, [id2])).rejects.toThrow(/multiple of 5/);
+    await expect(as(ALEX, `select * from public.complete_chore($1, 1445, 100)`, [id2])).rejects.toThrow(/Duration/);
 
     await expect(as(DREW, `select * from public.complete_chore($1, 5, 100)`, [id2])).rejects.toThrow(/not found/);
   });
@@ -372,7 +393,7 @@ describe("remove_completed_chore", () => {
 
   it("takes back both partners' points and deletes the chore, completion and its notifications", async () => {
     const [a0, b0] = [await points(ALEX), await points(BLAKE)];
-    const id = await chore(ALEX, "Undo me", 10);
+    const id = await chore(ALEX, "Undo me", 4); // 30 min = 6 + 4 = 10
     await as(ALEX, `select * from public.complete_chore($1, 30, 60)`, [id]); // Alex +6, Blake +4
     expect(await points(ALEX)).toBe(a0 + 6);
     expect(await points(BLAKE)).toBe(b0 + 4);
@@ -430,8 +451,8 @@ describe("recurring chores", () => {
   const seriesOf = async (id: string) =>
     (await admin(`select parent_recurrence_id from public.chore_instances where id = $1`, [id]))[0].parent_recurrence_id as string;
   const occurrences = (sid: string) =>
-    admin<{ id: string; d: string; title: string; points: number; who: string | null; done: boolean; rule: string }>(
-      `select id, scheduled_date::text d, title, points_assigned points, assigned_to who, is_completed done, recurrence_rule rule
+    admin<{ id: string; d: string; title: string; minutes: number; tax: number; who: string | null; done: boolean; rule: string }>(
+      `select id, scheduled_date::text d, title, estimated_duration minutes, chore_tax tax, assigned_to who, is_completed done, recurrence_rule rule
        from public.chore_instances where parent_recurrence_id = $1 order by scheduled_date`,
       [sid],
     );
@@ -454,7 +475,7 @@ describe("recurring chores", () => {
     expect(rows).toHaveLength(13); // the original + 12 weekly repeats
     expect(rows[0]).toMatchObject({ id, d: start, rule: "FREQ=WEEKLY" });
     rows.slice(1).forEach((r, i) => expect(gap(rows[i].d, r.d)).toBe(7));
-    expect(rows.every((r) => r.title === "Weekly bins" && r.points === 4 && r.who === ALEX && !r.done)).toBe(true);
+    expect(rows.every((r) => r.title === "Weekly bins" && r.minutes === 15 && r.tax === 4 && r.who === ALEX && !r.done)).toBe(true);
   });
 
   it("never back-fills a pile of overdue chores when the start date is in the past", async () => {
@@ -517,12 +538,12 @@ describe("recurring chores", () => {
     await as(ALEX, `select * from public.complete_chore($1, 10, 100)`, [rows[0].id]); // finished: stays as it was
     const pivot = rows[3];
 
-    await as(ALEX, `select public.update_chore_series($1, 'New name', 7, $2, 'weekly')`, [pivot.id, BLAKE]);
+    await as(ALEX, `select public.update_chore_series($1, 'New name', 30, 7, $2, 'weekly')`, [pivot.id, BLAKE]);
 
     const after = await occurrences(sid);
     for (const r of after) {
-      if (r.d < pivot.d) expect(r).toMatchObject({ title: "Old name", points: 5, who: ALEX });
-      else expect(r).toMatchObject({ title: "New name", points: 7, who: BLAKE });
+      if (r.d < pivot.d) expect(r).toMatchObject({ title: "Old name", minutes: 15, tax: 5, who: ALEX });
+      else expect(r).toMatchObject({ title: "New name", minutes: 30, tax: 7, who: BLAKE });
     }
     expect(after[0].done).toBe(true);
     expect(after).toHaveLength(rows.length); // same frequency: nothing regenerated
@@ -534,7 +555,7 @@ describe("recurring chores", () => {
     await as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [id]);
     const sid = await seriesOf(id);
     const pivot = (await occurrences(sid))[2];
-    await as(ALEX, `select public.update_chore_series($1, 'Weekly to daily', 2, $2, 'daily')`, [pivot.id, ALEX]);
+    await as(ALEX, `select public.update_chore_series($1, 'Weekly to daily', 15, 2, $2, 'daily')`, [pivot.id, ALEX]);
     const after = await occurrences(sid);
     const upTo = after.filter((r) => r.d <= pivot.d);
     const from = after.filter((r) => r.d >= pivot.d);
@@ -548,7 +569,7 @@ describe("recurring chores", () => {
     await as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [id]);
     const sid = await seriesOf(id);
     const pivot = (await occurrences(sid))[1];
-    await as(ALEX, `select public.update_chore_series($1, 'Stop me', 2, $2, 'none')`, [pivot.id, ALEX]);
+    await as(ALEX, `select public.update_chore_series($1, 'Stop me', 15, 2, $2, 'none')`, [pivot.id, ALEX]);
     const stopped = await occurrences(sid);
     expect(stopped[stopped.length - 1].d).toBe(pivot.d);
     await as(ALEX, `select public.extend_recurring_chores(current_date + 300)`);
@@ -558,11 +579,12 @@ describe("recurring chores", () => {
   it("validates input and refuses invalid states", async () => {
     const id = await chore(ALEX, "Validate", 2, ALEX, await dayFromNow(1));
     await expect(as(ALEX, `select public.make_chore_recurring($1, 'hourly')`, [id])).rejects.toThrow(/how often/);
-    await expect(as(ALEX, `select public.update_chore_series($1, 'x', 2, $2, 'weekly')`, [id, ALEX])).rejects.toThrow(/does not repeat/);
+    await expect(as(ALEX, `select public.update_chore_series($1, 'x', 15, 2, $2, 'weekly')`, [id, ALEX])).rejects.toThrow(/does not repeat/);
     await as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [id]);
     await expect(as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [id])).rejects.toThrow(/already repeats/);
-    await expect(as(ALEX, `select public.update_chore_series($1, '  ', 2, $2, 'weekly')`, [id, ALEX])).rejects.toThrow(/name/);
-    await expect(as(ALEX, `select public.update_chore_series($1, 'x', 11, $2, 'weekly')`, [id, ALEX])).rejects.toThrow(/between 1 and 10/);
+    await expect(as(ALEX, `select public.update_chore_series($1, '  ', 15, 2, $2, 'weekly')`, [id, ALEX])).rejects.toThrow(/name/);
+    await expect(as(ALEX, `select public.update_chore_series($1, 'x', 7, 2, $2, 'weekly')`, [id, ALEX])).rejects.toThrow(/multiple of 5/);
+    await expect(as(ALEX, `select public.update_chore_series($1, 'x', 15, 51, $2, 'weekly')`, [id, ALEX])).rejects.toThrow(/between 0 and 50/);
     const done = await chore(ALEX, "Already done", 2, ALEX, await dayFromNow(1));
     await as(ALEX, `select * from public.complete_chore($1, 5, 100)`, [done]);
     await expect(as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [done])).rejects.toThrow(/completed/);
@@ -582,11 +604,12 @@ describe("recurring chores", () => {
     expect((await as(BLAKE, `select 1 from public.chore_series`)).length).toBeGreaterThan(0);
   });
 
-  it("scheduled chores can now have their points edited, but not completion state", async () => {
-    const id = await chore(ALEX, "Edit points", 3, ALEX, await dayFromNow(1));
-    expect(await as(ALEX, `update public.chore_instances set points_assigned = 9 where id = $1 returning points_assigned`, [id])).toEqual([{ points_assigned: 9 }]);
+  it("scheduled chores can have their time estimate and tax edited, but not completion state", async () => {
+    const id = await chore(ALEX, "Edit estimate", 3, ALEX, await dayFromNow(1));
+    expect(await as(ALEX, `update public.chore_instances set estimated_duration = 30, chore_tax = 6 where id = $1 returning estimated_duration, chore_tax`, [id])).toEqual([{ estimated_duration: 30, chore_tax: 6 }]);
     await expect(as(ALEX, `update public.chore_instances set is_completed = true where id = $1`, [id])).rejects.toThrow(/permission denied/);
-    await expect(as(ALEX, `update public.chore_instances set points_assigned = 99 where id = $1`, [id])).rejects.toThrow(/check constraint/);
+    await expect(as(ALEX, `update public.chore_instances set estimated_duration = 7 where id = $1`, [id])).rejects.toThrow(/check constraint/);
+    await expect(as(ALEX, `update public.chore_instances set chore_tax = 51 where id = $1`, [id])).rejects.toThrow(/check constraint/);
   });
 });
 
@@ -618,10 +641,10 @@ describe("uncomplete_chore (uncheck)", () => {
     await as(BLAKE, `select public.uncomplete_chore($1)`, [id]); // either partner may uncheck
     expect(await points(ALEX)).toBe(a0);
 
-    expect(await as(ALEX, `update public.chore_instances set title = 'Redone', points_assigned = 8 where id = $1 returning id`, [id])).toHaveLength(1);
-    await as(ALEX, `select * from public.complete_chore($1, 20, 50)`, [id]); // 8 pts at 50/50 -> 4 + 4
-    expect(await points(ALEX)).toBe(a0 + 4);
-    expect(await points(BLAKE)).toBe(b0 + 4);
+    expect(await as(ALEX, `update public.chore_instances set title = 'Redone', chore_tax = 2 where id = $1 returning id`, [id])).toHaveLength(1);
+    await as(ALEX, `select * from public.complete_chore($1, 20, 50)`, [id]); // 20 min = 4 base + 2 tax = 6 -> 3 + 3
+    expect(await points(ALEX)).toBe(a0 + 3);
+    expect(await points(BLAKE)).toBe(b0 + 3);
     expect(await admin1(`select 1 from public.chore_completions where instance_id = $1`, [id])).toBe(1);
   });
 
@@ -656,8 +679,8 @@ describe("edit_completed_chore", () => {
 
     await as(ALEX, `select public.edit_completed_chore($1, '  Fixed name  ', $2, '2026-09-11')`, [id, BLAKE]);
 
-    const [inst] = await admin(`select title, assigned_to, scheduled_date::text d, is_completed, points_assigned from public.chore_instances where id = $1`, [id]);
-    expect(inst).toEqual({ title: "Fixed name", assigned_to: BLAKE, d: "2026-09-11", is_completed: true, points_assigned: 10 });
+    const [inst] = await admin(`select title, assigned_to, scheduled_date::text d, is_completed, chore_tax from public.chore_instances where id = $1`, [id]);
+    expect(inst).toEqual({ title: "Fixed name", assigned_to: BLAKE, d: "2026-09-11", is_completed: true, chore_tax: 10 });
     expect(await points(ALEX)).toBe(a0);
     expect(await points(BLAKE)).toBe(b0);
     expect((await admin(`select * from public.chore_completions where instance_id = $1`, [id]))[0]).toEqual(before);
@@ -695,5 +718,88 @@ describe("edit_completed_chore", () => {
     const id = await chore(ALEX, "Locked direct", 2);
     await as(ALEX, `select * from public.complete_chore($1, 5, 100)`, [id]);
     expect(await as(ALEX, `update public.chore_instances set title = 'sneaky' where id = $1 returning id`, [id])).toHaveLength(0);
+  });
+});
+
+describe("time-based points and chore tax", () => {
+  const points = async (uid: string) =>
+    (await as(uid, `select points from public.profiles where id = $1`, [uid]))[0].points as number;
+
+  it("chore_points: 12 points per hour (1 per 5 minutes) plus a flat tax", async () => {
+    const pts = async (m: number, t: number) => (await admin(`select public.chore_points($1, $2) as p`, [m, t]))[0].p as number;
+    expect(await pts(5, 0)).toBe(1); // the minimum: 1 base point
+    expect(await pts(60, 0)).toBe(12); // 12 points per hour
+    expect(await pts(25, 0)).toBe(5);
+    expect(await pts(25, 4)).toBe(9);
+  });
+
+  it("the tax is a flat bonus that does not depend on how long it took", async () => {
+    const [a0] = [await points(ALEX)];
+    const quick = await chore(ALEX, "Quick nasty", 6);
+    const [q] = await as(ALEX, `select * from public.complete_chore($1, 5, 100)`, [quick]);
+    expect(q.user_a_points).toBe(1 + 6);
+    const slow = await chore(ALEX, "Slow nasty", 6);
+    const [l] = await as(ALEX, `select * from public.complete_chore($1, 60, 100)`, [slow]);
+    expect(l.user_a_points).toBe(12 + 6);
+    expect(await points(ALEX)).toBe(a0 + 7 + 18);
+  });
+
+  it("matches the worked example: 25 min, tax 4, split 60/40 -> total 9 = 5 + 4", async () => {
+    const id = await chore(ALEX, "Worked example", 4);
+    const [c] = await as(ALEX, `select * from public.complete_chore($1, 25, 60)`, [id]);
+    expect(c).toMatchObject({ user_a_duration: 15, user_a_points: 5, user_b_duration: 10, user_b_points: 4, total_duration_minutes: 25 });
+  });
+
+  it("uses the logged time, not the estimate", async () => {
+    const id = await chore(ALEX, "Estimate 15", 0, ALEX, "2026-09-18", 15);
+    const [c] = await as(ALEX, `select * from public.complete_chore($1, 45, 100)`, [id]);
+    expect(c.user_a_points).toBe(9);
+  });
+});
+
+describe("unassigned chore pool", () => {
+  const points = async (uid: string) =>
+    (await as(uid, `select points from public.profiles where id = $1`, [uid]))[0].points as number;
+
+  it("an unassigned chore can be created, adjusted and claimed by either partner", async () => {
+    const id = await chore(ALEX, "Open task", 0, null);
+    expect((await admin(`select assigned_to from public.chore_instances where id = $1`, [id]))[0].assigned_to).toBeNull();
+    // before claiming: tweak the estimate and tax
+    await as(BLAKE, `update public.chore_instances set estimated_duration = 30, chore_tax = 5 where id = $1`, [id]);
+    // claim
+    expect(await as(BLAKE, `update public.chore_instances set assigned_to = $2 where id = $1 returning assigned_to`, [id, BLAKE])).toEqual([{ assigned_to: BLAKE }]);
+  });
+
+  it("creating an unassigned chore does not notify anyone", async () => {
+    const before = (await as(BLAKE, `select 1 from public.notifications`)).length;
+    await chore(ALEX, "Silent open task", 0, null);
+    expect((await as(BLAKE, `select 1 from public.notifications`)).length).toBe(before);
+  });
+
+  it("completing an unassigned chore claims it for you and gives you 100% by default", async () => {
+    const [b0, a0] = [await points(BLAKE), await points(ALEX)];
+    const id = await chore(ALEX, "Grab and go", 4, null); // 30 min = 6 + 4 = 10
+    const [c] = await as(BLAKE, `select * from public.complete_chore($1, 30, 100)`, [id]);
+    expect(c).toMatchObject({ user_a_id: BLAKE, user_a_points: 10, user_a_duration: 30, user_b_id: ALEX, user_b_points: 0 });
+    expect(await points(BLAKE)).toBe(b0 + 10);
+    expect(await points(ALEX)).toBe(a0);
+    expect((await admin(`select assigned_to from public.chore_instances where id = $1`, [id]))[0].assigned_to).toBe(BLAKE);
+  });
+
+  it("an unassigned chore can still be completed with a split", async () => {
+    const id = await chore(ALEX, "Team effort", 0, null); // 20 min = 4
+    const [c] = await as(ALEX, `select * from public.complete_chore($1, 20, 50)`, [id]);
+    expect(c).toMatchObject({ user_a_points: 2, user_b_points: 2 });
+  });
+
+  it("other households cannot see or complete it", async () => {
+    const id = await chore(ALEX, "Not for Drew", 0, null);
+    await expect(as(DREW, `select * from public.complete_chore($1, 5, 100)`, [id])).rejects.toThrow(/not found/);
+    expect(await as(DREW, `select 1 from public.chore_instances where id = $1`, [id])).toHaveLength(0);
+  });
+
+  it("you can hand a claimed chore back to the pool", async () => {
+    const id = await chore(ALEX, "Unclaim", 0, ALEX);
+    expect(await as(ALEX, `update public.chore_instances set assigned_to = null where id = $1 returning id`, [id])).toHaveLength(1);
   });
 });

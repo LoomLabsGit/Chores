@@ -4,18 +4,19 @@ import { useState } from "react";
 import { formatLongDay } from "@/lib/logic/dates";
 import { allChoresAlphabetical, commonChores, recentChores } from "@/lib/logic/library";
 import { describeRepeat, REPEAT_OPTIONS, type RepeatChoice } from "@/lib/logic/recurrence";
-import { formatMinutes } from "@/lib/logic/split";
+import { calculatePoints, ESTIMATE_STEPS, snapMinutes } from "@/lib/logic/points";
 import { useHousehold } from "@/lib/store/household-store";
 import type { ChoreLibraryItem } from "@/lib/types";
 import { Icon } from "../icons";
 import { useToast } from "../toast";
-import { Avatar, fieldClass, primaryButton, Segmented, Stepper } from "../ui/controls";
+import { fieldClass, primaryButton } from "../ui/controls";
+import { AssigneeField, DurationField, RewardPreview, TaxField } from "../ui/points-controls";
 import { ConfirmDialog, Modal } from "../ui/modal";
 
 /** What the user picked in step 1, waiting for "when / who / repeat" in step 2. */
 type Draft =
   | { kind: "library"; chore: ChoreLibraryItem }
-  | { kind: "new"; title: string; points: number; minutes: number };
+  | { kind: "new"; title: string };
 
 type Props = {
   open: boolean;
@@ -35,7 +36,7 @@ export function AddChoreSheet({ open, ...rest }: Props) {
 function Sheet({ date, onClose, onAdded }: Omit<Props, "open">) {
   const [draft, setDraft] = useState<Draft | null>(null);
   // Remember a typed chore so "Back" does not lose it.
-  const [typed, setTyped] = useState({ title: "", points: 5, minutes: 15 });
+  const [typed, setTyped] = useState("");
 
   return (
     <Modal
@@ -59,9 +60,9 @@ function Sheet({ date, onClose, onAdded }: Omit<Props, "open">) {
         draft ? undefined : (
           <NewChoreInput
             initial={typed}
-            onNext={(t) => {
-              setTyped(t);
-              setDraft({ kind: "new", ...t });
+            onNext={(title) => {
+              setTyped(title);
+              setDraft({ kind: "new", title });
             }}
           />
         )
@@ -93,8 +94,8 @@ function Pill({
       >
         {chore.title}
         <span className="flex items-center gap-0.5 text-xs font-extrabold text-gold">
-          <Icon name="star" size={11} />
-          {chore.default_points}
+          <Icon name="bolt" size={11} />
+          {calculatePoints(chore.default_duration, chore.chore_tax)}
         </span>
       </button>
       {onDelete && (
@@ -184,61 +185,40 @@ function Library({ onPick }: { onPick: (c: ChoreLibraryItem) => void }) {
   );
 }
 
-/** Docked at the bottom of step 1: type a name, set points + duration, continue. */
-function NewChoreInput({
-  initial,
-  onNext,
-}: {
-  initial: { title: string; points: number; minutes: number };
-  onNext: (t: { title: string; points: number; minutes: number }) => void;
-}) {
-  const [title, setTitle] = useState(initial.title);
-  const [points, setPoints] = useState(initial.points);
-  const [minutes, setMinutes] = useState(initial.minutes);
+/** Docked at the bottom of step 1: type a name and continue. Duration, tax and the rest come next. */
+function NewChoreInput({ initial, onNext }: { initial: string; onNext: (title: string) => void }) {
+  const [title, setTitle] = useState(initial);
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
     const name = title.trim();
-    if (!name) return;
-    onNext({ title: name, points, minutes });
+    if (name) onNext(name);
   }
 
   return (
-    <form onSubmit={submit} className="flex flex-col gap-2.5">
-      <div className="flex gap-2">
-        <input
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          maxLength={60}
-          placeholder="Add a new chore..."
-          aria-label="New chore name"
-          enterKeyHint="next"
-          className={fieldClass}
-        />
-        <button
-          type="submit"
-          disabled={!title.trim()}
-          aria-label="Continue with this new chore"
-          className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-brand text-brand-ink disabled:opacity-40"
-        >
-          <Icon name="chevron-right" size={24} strokeWidth={2.5} />
-        </button>
-      </div>
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1">
-          <Stepper label="points" value={points} min={1} max={10} onChange={setPoints} />
-          <span className="text-xs font-bold text-muted">pts</span>
-        </div>
-        <div className="flex items-center gap-1">
-          <Stepper label="minutes" value={minutes} min={5} max={240} step={5} onChange={setMinutes} />
-          <span className="text-xs font-bold text-muted">min</span>
-        </div>
-      </div>
+    <form onSubmit={submit} className="flex gap-2">
+      <input
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        maxLength={60}
+        placeholder="Add a new chore..."
+        aria-label="New chore name"
+        enterKeyHint="next"
+        className={fieldClass}
+      />
+      <button
+        type="submit"
+        disabled={!title.trim()}
+        aria-label="Continue with this new chore"
+        className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-brand text-brand-ink disabled:opacity-40"
+      >
+        <Icon name="chevron-right" size={24} strokeWidth={2.5} />
+      </button>
     </form>
   );
 }
 
-/** Step 2: which day, who does it, and whether it repeats. Nothing is added until "Add". */
+/** Step 2: how long, how nasty, which day, who does it, and whether it repeats. Nothing is added until "Add". */
 function WhenWhoRepeat({
   draft,
   date,
@@ -253,27 +233,30 @@ function WhenWhoRepeat({
   const { me, partner, tone, actions } = useHousehold();
   const { toast } = useToast();
   const [day, setDay] = useState(date);
-  const [assignee, setAssignee] = useState(me.id);
+  const [assignee, setAssignee] = useState<string | null>(me.id);
   const [repeat, setRepeat] = useState<RepeatChoice>("none");
+  const [minutes, setMinutes] = useState(draft.kind === "library" ? snapMinutes(draft.chore.default_duration) : 15);
+  const [tax, setTax] = useState(draft.kind === "library" ? draft.chore.chore_tax : 0);
 
   const name = draft.kind === "library" ? draft.chore.title : draft.title;
-  const points = draft.kind === "library" ? draft.chore.default_points : draft.points;
-  const minutes = draft.kind === "library" ? draft.chore.default_duration : draft.minutes;
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!day) return;
-    const repeating = repeat !== "none" ? repeat : undefined;
+    const repeating = repeat !== "none";
     onClose();
     onAdded(day); // jump the calendar to that week straight away; the chore appears optimistically
     const run =
       draft.kind === "library"
-        ? actions.scheduleChore(draft.chore, day, assignee, repeat)
-        : actions.createAndScheduleChore({ title: draft.title, points: draft.points, minutes: draft.minutes }, day, assignee, repeat);
+        ? actions.scheduleChore(draft.chore, day, assignee, { repeat, minutes, tax })
+        : actions.createAndScheduleChore({ title: draft.title, minutes, tax }, day, assignee, repeat);
     void run.then(
       (ok) =>
         ok &&
-        toast(repeating ? `Added ${name}. ${describeRepeat(repeat, day)}` : `Added ${name} to ${formatLongDay(day)}`, "success"),
+        toast(
+          repeating ? `Added ${name}. ${describeRepeat(repeat, day)}` : `Added ${name} to ${formatLongDay(day)}`,
+          "success",
+        ),
     );
   }
 
@@ -281,14 +264,17 @@ function WhenWhoRepeat({
     <form onSubmit={submit} className="flex flex-col gap-5">
       <div className="rounded-2xl bg-raised p-4">
         <p className="text-lg font-extrabold leading-snug">{name}</p>
-        <p className="mt-1 flex items-center gap-3 text-sm font-bold text-muted">
-          <span className="flex items-center gap-1 text-gold">
-            <Icon name="star" size={13} />
-            {points} pts
-          </span>
-          <span>{formatMinutes(minutes)}</span>
-        </p>
       </div>
+
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="add-minutes" className="text-sm font-extrabold">
+          How long will it take?
+        </label>
+        <DurationField inputId="add-minutes" value={minutes} onChange={setMinutes} steps={ESTIMATE_STEPS} label="Estimated minutes" />
+      </div>
+
+      <TaxField value={tax} onChange={setTax} />
+      <RewardPreview minutes={minutes} tax={tax} />
 
       <label className="flex flex-col gap-1.5 text-sm font-extrabold">
         Day
@@ -296,25 +282,7 @@ function WhenWhoRepeat({
         <span className="text-xs font-semibold text-muted">{day ? formatLongDay(day) : "Choose a day"}</span>
       </label>
 
-      {partner && (
-        <div className="flex flex-col gap-1.5">
-          <span className="text-sm font-extrabold">Assigned to</span>
-          <Segmented
-            label="Assigned to"
-            value={assignee}
-            onChange={setAssignee}
-            options={[me, partner].map((m) => ({
-              value: m.id,
-              label: (
-                <>
-                  <Avatar name={m.display_name} tone={tone(m.id)} size={22} />
-                  {m.id === me.id ? "Me" : m.display_name}
-                </>
-              ),
-            }))}
-          />
-        </div>
-      )}
+      <AssigneeField value={assignee} onChange={setAssignee} me={me} partner={partner} tone={tone} />
 
       <div className="flex flex-col gap-1.5">
         <label htmlFor="add-repeat" className="text-sm font-extrabold">

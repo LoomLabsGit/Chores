@@ -6,7 +6,7 @@ Next.js (App Router) + Tailwind on Vercel, Supabase for Postgres, Auth and Realt
 ## Setup
 
 1. **Supabase project.** Create one, then apply the schema: paste each file in `supabase/migrations/` into the SQL editor,
-   **in order** (`0001_init.sql` … `0005_edit_completed_chore.sql`), or use `supabase link` + `supabase db push`.
+   **in order** (`0001_init.sql` … `0006_time_based_points.sql`), or use `supabase link` + `supabase db push`.
    Pushing code to GitHub never changes the database, so run any new migration file by hand.
 2. **Auth.** Email + password. If "Confirm email" is on, add `https://YOUR-DOMAIN/auth/callback` (and
    `http://localhost:3000/auth/callback`) under Authentication → URL Configuration.
@@ -53,10 +53,14 @@ in order (`0004_…`) and should be additive; a migration runs against live data
 - **Schema additions:** a `households` table with an invite code (partners need some way to end up in one household), FKs
   on `household_id`, `challenges.completed_at` (Stats needs to date payouts), `challenge_declined` / `challenge_completed`
   notification types, and a 1–10 check on `chore_instances.points_assigned`.
-- **Rounding:** each partner's minutes and points use `round(total × share)` independently, as specified. For odd totals the
-  two shares can sum to more than the total (5 pts at 50/50 pays 3 + 3). Change `share()` in `lib/logic/split.ts` and the SQL
-  in `complete_chore` together if you would rather conserve the total.
-- **Points go to whoever taps Complete** (or are split between the two), not to the chore's assignee.
+- **Points are time-based** (migration 0006). Base points = `round(minutes / 5)` (12 an hour, minimum 5 minutes), plus a flat
+  **chore tax** (0-50) for unpleasant jobs. Each chore has an estimated time and tax; the points you actually earn come from
+  the time you log at completion. The split gives the caller `round(total * share)` and their partner the remainder, so the two
+  shares always add up exactly. The formula lives in `lib/logic/points.ts` and `public.chore_points()`; keep the two in step.
+  The old per-chore "points" columns (`points_assigned`, `default_points`) are legacy and no longer read.
+- **Unassigned pool:** a chore with no assignee shows as an open task. Tap it to claim it, adjust its estimate/tax, or complete
+  it straight away (completing claims it for you at 100% by default).
+- **Points go to whoever tapped Complete** (or are split between the two), not to the chore's assignee.
 - **"Profile switcher"** is a profile menu (members, invite code, sign out): each partner signs in on their own device, so
   there is nothing to switch between.
 - **Common tasks** are matched by title against the six base chores; **Recent** is the five most recently scheduled.

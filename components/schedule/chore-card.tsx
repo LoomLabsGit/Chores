@@ -1,6 +1,7 @@
 "use client";
 
 import { useDraggable } from "@dnd-kit/core";
+import { estimatePoints } from "@/lib/logic/points";
 import { formatMinutes } from "@/lib/logic/split";
 import { useHousehold } from "@/lib/store/household-store";
 import type { ChoreInstance } from "@/lib/types";
@@ -65,6 +66,8 @@ export function ChoreCardView({
   const { state, tone, nameOf } = useHousehold();
   const completion = state.completions[instance.id];
   const done = instance.is_completed;
+  // Unassigned chores are the open pool: anyone can claim them (or just complete them).
+  const unassigned = instance.assigned_to === null && !done;
 
   const contributors = completion
     ? [
@@ -103,13 +106,22 @@ export function ChoreCardView({
         </>
       ) : (
         <>
-          <span className="flex items-center gap-1">
-            <Avatar name={nameOf(instance.assigned_to)} tone={tone(instance.assigned_to)} size={18} />
-            {!compact && nameOf(instance.assigned_to)}
-          </span>
-          <span className="flex items-center gap-0.5 text-gold">
-            <Icon name="star" size={11} />
-            {instance.points_assigned}
+          {unassigned ? (
+            <span className="rounded-full px-2 py-0.5 text-[11px] font-extrabold uppercase tracking-wide text-muted ring-1 ring-inset ring-muted/40">
+              Unassigned
+            </span>
+          ) : (
+            <span className="flex items-center gap-1">
+              <Avatar name={nameOf(instance.assigned_to)} tone={tone(instance.assigned_to)} size={18} />
+              {!compact && nameOf(instance.assigned_to)}
+            </span>
+          )}
+          <span
+            className="flex items-center gap-0.5 rounded-full bg-gold-soft px-1.5 py-0.5 text-gold"
+            aria-label={`Worth about ${estimatePoints(instance)} points`}
+          >
+            <Icon name="bolt" size={11} />
+            {estimatePoints(instance)} pts
           </span>
           {instance.is_recurring && (
             <span className="flex items-center" role="img" aria-label="Repeats" title="Repeats">
@@ -126,7 +138,7 @@ export function ChoreCardView({
     <button
       onClick={() => !done && onOpen(instance)}
       disabled={done}
-      aria-label={done ? undefined : `Complete ${instance.title}`}
+      aria-label={done ? undefined : unassigned ? `Claim or complete ${instance.title}` : `Complete ${instance.title}`}
       className={`min-h-11 min-w-0 text-left disabled:cursor-default ${
         compact ? "block w-full rounded-t-xl px-2.5 pb-1 pt-2.5" : "flex-1 rounded-xl px-1.5 py-1.5"
       }`}
@@ -149,7 +161,7 @@ export function ChoreCardView({
   ) : (
     <button
       onClick={() => onOpen(instance)}
-      aria-label={`Mark ${instance.title} complete`}
+      aria-label={unassigned ? `Claim or complete ${instance.title}` : `Mark ${instance.title} complete`}
       className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full"
     >
       <span className="h-8 w-8 rounded-full border-2 border-line bg-surface transition-colors hover:border-ok" />
@@ -160,7 +172,9 @@ export function ChoreCardView({
     <article
       className={`rounded-2xl border bg-surface ${compact ? "flex flex-col" : "flex items-center gap-0.5 p-1 pr-1.5"} ${
         floating ? "rotate-1 border-brand shadow-sheet" : "shadow-card"
-      } ${overdue && !done ? "border-warn/50" : "border-line"} ${done ? "bg-raised" : ""}`}
+      } ${
+        unassigned ? "border-dashed border-muted/60 bg-raised/60" : overdue && !done ? "border-warn/50" : "border-line"
+      } ${done ? "bg-raised" : ""}`}
     >
       {compact ? (
         <>

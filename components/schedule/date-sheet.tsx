@@ -58,7 +58,8 @@ function DateForm({
       ? // Finished chores go through the server function that leaves points and time untouched.
         await actions.editChore(instance, {
           title: instance.title,
-          points: instance.points_assigned,
+          minutes: instance.estimated_duration,
+          tax: instance.chore_tax,
           assignedTo: instance.assigned_to,
           date,
           repeat: "none",
