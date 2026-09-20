@@ -13,15 +13,15 @@ import {
   titleTaken,
 } from "@/lib/logic/library";
 import { describeRepeat, REPEAT_OPTIONS, type RepeatChoice } from "@/lib/logic/recurrence";
-import { calculatePoints, ESTIMATE_STEPS, snapMinutes } from "@/lib/logic/points";
+import { DEFAULT_BOUNTY, ESTIMATE_STEPS, libraryPoints, snapMinutes } from "@/lib/logic/points";
 import { useHousehold } from "@/lib/store/household-store";
-import type { ChoreLibraryItem } from "@/lib/types";
+import type { ChoreLibraryItem, PricingType } from "@/lib/types";
 import { Icon } from "../icons";
 import { useToast } from "../toast";
 import { CategoryChips } from "../ui/category-chips";
 import { CategoryCombobox } from "../ui/category-combobox";
 import { fieldClass, primaryButton } from "../ui/controls";
-import { AssigneeField, DurationField, RewardPreview, TaxField } from "../ui/points-controls";
+import { AssigneeField, PricingFields } from "../ui/points-controls";
 import { Modal } from "../ui/modal";
 
 /** What the user picked in step 1, waiting for "when / who / repeat" in step 2. */
@@ -110,7 +110,7 @@ function Pill({ chore, onPick }: { chore: ChoreLibraryItem; onPick: (c: ChoreLib
       {chore.title}
       <span className="flex items-center gap-0.5 text-xs font-extrabold text-gold">
         <Icon name="bolt" size={11} />
-        {calculatePoints(chore.default_duration, chore.chore_tax)}
+        {libraryPoints(chore)}
       </span>
     </button>
   );
@@ -310,6 +310,9 @@ function WhenWhoRepeat({
   const [repeat, setRepeat] = useState<RepeatChoice>("none");
   const [minutes, setMinutes] = useState(draft.kind === "library" ? snapMinutes(draft.chore.default_duration) : 15);
   const [tax, setTax] = useState(draft.kind === "library" ? draft.chore.chore_tax : 0);
+  // A library chore brings its own pricing model; a new one starts time-based.
+  const [pricing, setPricing] = useState<PricingType>(draft.kind === "library" ? draft.chore.pricing_type : "time_based");
+  const [bounty, setBounty] = useState(draft.kind === "library" ? draft.chore.fixed_bounty_points : DEFAULT_BOUNTY);
   // Only a brand-new chore needs a category; one from the library already has its own.
   const [category, setCategory] = useState("");
 
@@ -323,9 +326,9 @@ function WhenWhoRepeat({
     onAdded(day); // jump the calendar to that week straight away; the chore appears optimistically
     const run =
       draft.kind === "library"
-        ? actions.scheduleChore(draft.chore, day, assignee, { repeat, minutes, tax })
+        ? actions.scheduleChore(draft.chore, day, assignee, { repeat, minutes, tax, pricing, bounty })
         : actions.createAndScheduleChore(
-            { title: draft.title, minutes, tax, category: resolveCategory(categories, category) },
+            { title: draft.title, minutes, tax, pricing, bounty, category: resolveCategory(categories, category) },
             day,
             assignee,
             repeat,
@@ -355,15 +358,18 @@ function WhenWhoRepeat({
         </div>
       )}
 
-      <div className="flex flex-col gap-1.5">
-        <label htmlFor="add-minutes" className="text-sm font-extrabold">
-          How long will it take?
-        </label>
-        <DurationField inputId="add-minutes" value={minutes} onChange={setMinutes} steps={ESTIMATE_STEPS} label="Estimated minutes" />
-      </div>
-
-      <TaxField value={tax} onChange={setTax} />
-      <RewardPreview minutes={minutes} tax={tax} />
+      <PricingFields
+        pricing={pricing}
+        onPricing={setPricing}
+        bounty={bounty}
+        onBounty={setBounty}
+        minutes={minutes}
+        onMinutes={setMinutes}
+        tax={tax}
+        onTax={setTax}
+        steps={ESTIMATE_STEPS}
+        timeId="add-minutes"
+      />
 
       <label className="flex flex-col gap-1.5 text-sm font-extrabold">
         Day

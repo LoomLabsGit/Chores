@@ -1,3 +1,4 @@
+import { jointHalf } from "./challenges";
 import type {
   Challenge,
   ChoreCompletion,
@@ -100,8 +101,13 @@ export function computeStats(input: StatsInput): StatsResult {
 
   for (const ch of input.challenges) {
     if (ch.status === "completed" && inWindow(ch.completed_at, start)) {
-      const u = perUser[ch.assigned_to];
-      if (u) u.challengePoints += ch.reward_points;
+      if (ch.is_joint) {
+        // A joint challenge pays each partner half. (A forfeit pays nothing, so it adds nothing here.)
+        for (const id of memberIds) perUser[id].challengePoints += jointHalf(ch.reward_points);
+      } else {
+        const u = perUser[ch.assigned_to];
+        if (u) u.challengePoints += ch.reward_points;
+      }
     }
   }
   for (const r of input.redemptions) {

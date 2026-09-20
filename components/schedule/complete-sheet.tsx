@@ -4,8 +4,8 @@ import { useState } from "react";
 import { formatLongDay } from "@/lib/logic/dates";
 import {
   calculateBasePoints,
-  calculatePoints,
   calculateSplit,
+  choreTotal,
   COMPLETION_STEPS,
   estimatePoints,
   snapMinutes,
@@ -66,8 +66,10 @@ function CompleteForm({
   const otherTone = other ? tone(other.id) : ownerTone === "a" ? "b" : "a";
 
   const pct = split ? ownerPct : 100;
+  // A fixed bounty (a "mission") pays the same whatever the time; the minutes are only saved for Stats.
+  const mission = instance.pricing_type === "fixed_bounty";
   const base = calculateBasePoints(minutes);
-  const total = calculatePoints(minutes, instance.chore_tax);
+  const total = choreTotal(minutes, instance);
   const result = calculateSplit(minutes, total, pct); // a = owner, b = the other person
   const myPoints = ownerIsMe ? result.a.points : result.b.points;
 
@@ -90,16 +92,19 @@ function CompleteForm({
       <p className="-mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-semibold text-muted">
         <span className="flex items-center gap-1 text-gold">
           <Icon name="bolt" size={14} />
-          {estimatePoints(instance)} pts est.
+          {estimatePoints(instance)} pts {mission ? "fixed" : "est."}
         </span>
         <span>{formatLongDay(instance.scheduled_date)}</span>
         <span>{instance.assigned_to ? `Assigned to ${nameOf(instance.assigned_to)}` : "Unassigned"}</span>
       </p>
 
       <section aria-labelledby="duration-label" className="flex flex-col gap-2.5">
-        <label id="duration-label" htmlFor="duration" className="text-sm font-extrabold">
-          How long did it take?
-        </label>
+        <div>
+          <label id="duration-label" htmlFor="duration" className="text-sm font-extrabold">
+            How long did it take?
+          </label>
+          {mission && <p className="text-xs font-semibold text-muted">Only saved for your stats. It doesn&rsquo;t change the points.</p>}
+        </div>
         <DurationField inputId="duration" value={minutes} onChange={setMinutes} steps={COMPLETION_STEPS} label="Minutes taken" />
       </section>
 
@@ -115,20 +120,40 @@ function CompleteForm({
       />
 
       <section aria-label="Points breakdown" className="rounded-3xl border border-line bg-raised p-4 text-[15px]">
-        <div className="flex items-baseline justify-between gap-3">
-          <span className="font-bold text-muted">Logged: {minutes} mins</span>
-          <span className="font-extrabold tabular-nums">{base} Base Pts</span>
-        </div>
-        <div className="mt-1.5 flex items-baseline justify-between gap-3">
-          <span className="font-bold text-muted">Chore Tax:</span>
-          <span className="font-extrabold tabular-nums">+{instance.chore_tax} Pts</span>
-        </div>
-        <div className="mt-2.5 flex items-baseline justify-between gap-3 border-t border-line pt-2.5">
-          <span className="font-extrabold">Total Reward:</span>
-          <span className="text-lg font-extrabold tabular-nums text-gold" aria-live="polite">
-            {total} Points
-          </span>
-        </div>
+        {mission ? (
+          <>
+            <p className="pb-2 text-sm font-bold text-muted">
+              Task: <span className="text-ink">{instance.title}</span> (Fixed Mission)
+            </p>
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="font-bold text-muted">Time Logged: {minutes} mins</span>
+              <span className="text-xs font-bold text-muted">Saved for stats</span>
+            </div>
+            <div className="mt-2.5 flex items-baseline justify-between gap-3 border-t border-line pt-2.5">
+              <span className="font-extrabold">Fixed Bounty:</span>
+              <span className="text-lg font-extrabold tabular-nums text-gold" aria-live="polite">
+                {total} Points
+              </span>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="font-bold text-muted">Logged: {minutes} mins</span>
+              <span className="font-extrabold tabular-nums">{base} Base Pts</span>
+            </div>
+            <div className="mt-1.5 flex items-baseline justify-between gap-3">
+              <span className="font-bold text-muted">Chore Tax:</span>
+              <span className="font-extrabold tabular-nums">+{instance.chore_tax} Pts</span>
+            </div>
+            <div className="mt-2.5 flex items-baseline justify-between gap-3 border-t border-line pt-2.5">
+              <span className="font-extrabold">Total Reward:</span>
+              <span className="text-lg font-extrabold tabular-nums text-gold" aria-live="polite">
+                {total} Points
+              </span>
+            </div>
+          </>
+        )}
         {!ownerIsMe && !split && (
           <p className="mt-3 border-t border-line pt-3 text-sm font-bold text-muted">
             This is {owner.display_name}&rsquo;s chore, so all {result.a.points} points go to {owner.display_name}.

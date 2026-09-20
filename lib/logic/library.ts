@@ -1,4 +1,4 @@
-import type { ChoreLibraryItem } from "@/lib/types";
+import type { ChoreLibraryItem, PricingType } from "@/lib/types";
 import { formatDelta } from "./ledger";
 
 /** The six pre-baked chores shown in the Add Chore sheet's "Common" row. */
@@ -109,14 +109,23 @@ export function titleTaken(library: ChoreLibraryItem[], title: string, exceptId?
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
-export type LibraryValues = { title: string; minutes: number; tax: number };
+export type LibraryValues = {
+  title: string;
+  minutes: number;
+  tax: number;
+  /** Defaults to time-based. */
+  pricing?: PricingType;
+  /** Defaults to 15. Only matters for a fixed bounty. */
+  bounty?: number;
+};
 
 /**
  * What saving an edit will do to chores that already exist, as short sentences. Mirrors
- * public.update_library_chore(): a new name reaches every copy (finished ones too), a new time or tax
- * reaches unfinished copies and repeating chores, and a new tax also re-prices finished chores (moving
- * balances by the difference) unless `repriceFinished` is off. A new time never changes finished chores:
- * their points come from the time actually logged.
+ * public.update_library_chore(): a new name reaches every copy (finished ones too); time, tax, bounty and the
+ * pricing model reach unfinished copies and repeating chores. Finished chores are re-priced (moving balances by
+ * the difference) only when the value that priced them changed: the tax of a time-based chore, or the bounty of
+ * a fixed-bounty one, and only if `repriceFinished` is on. Time only ever changes the estimate, and a change of
+ * pricing model never rewrites history.
  */
 export function describePush(
   before: LibraryValues,
@@ -125,27 +134,42 @@ export function describePush(
   repriceFinished = true,
 ): string[] {
   const lines: string[] = [];
+  const modelBefore = before.pricing ?? "time_based";
+  const modelAfter = after.pricing ?? "time_based";
+  const fixed = modelAfter === "fixed_bounty";
+
   const renamed = before.title.trim() !== after.title.trim();
-  const timeChanged = before.minutes !== after.minutes;
-  const taxChanged = before.tax !== after.tax;
+  const modelChanged = modelBefore !== modelAfter;
+  const timeChanged = !fixed && before.minutes !== after.minutes;
+  const taxChanged = !fixed && before.tax !== after.tax;
+  const bountyChanged = fixed && (before.bounty ?? 15) !== (after.bounty ?? 15);
 
   if (renamed) {
     const copies = usage.open + usage.done;
     if (copies > 0) lines.push(`The new name shows on ${plural(copies, "chore")} already on the calendar.`);
   }
-  if (timeChanged || taxChanged) {
-    const what = timeChanged && taxChanged ? "time and tax" : timeChanged ? "time" : "tax";
+
+  const changes = [
+    modelChanged ? (fixed ? "fixed bounty" : "time-based pricing") : null,
+    timeChanged ? "time" : null,
+    taxChanged ? "tax" : null,
+    bountyChanged || (modelChanged && fixed) ? "bounty" : null,
+  ].filter((c): c is string => !!c);
+  if (changes.length) {
+    const what = changes.length > 1 ? `${changes.slice(0, -1).join(", ")} and ${changes[changes.length - 1]}` : changes[0];
     const targets = [
       usage.open > 0 ? plural(usage.open, "unfinished chore") : null,
       usage.repeating > 0 ? `${plural(usage.repeating, "repeating chore")} (every later day)` : null,
     ].filter(Boolean);
-    if (targets.length) lines.push(`The new ${what} ${what === "time and tax" ? "apply" : "applies"} to ${targets.join(" and ")}.`);
+    if (targets.length) lines.push(`The new ${what} ${changes.length > 1 ? "apply" : "applies"} to ${targets.join(" and ")}.`);
   }
-  if (usage.done > 0 && (timeChanged || taxChanged)) {
-    if (taxChanged && repriceFinished) {
-      lines.push(
-        `${plural(usage.done, "finished chore")} will be re-priced (${formatDelta(after.tax - before.tax)} pts each) and balances adjusted to match.`,
-      );
+
+  if (usage.done > 0 && changes.length) {
+    // Finished chores only follow a change to the very value that priced them.
+    const repriced = !modelChanged && (taxChanged || bountyChanged);
+    if (repriced && repriceFinished) {
+      const perChore = bountyChanged ? (after.bounty ?? 15) - (before.bounty ?? 15) : after.tax - before.tax;
+      lines.push(`${plural(usage.done, "finished chore")} will be re-priced (${formatDelta(perChore)} pts each) and balances adjusted to match.`);
     } else {
       lines.push("Finished chores keep the points they earned.");
     }

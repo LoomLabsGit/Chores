@@ -6,10 +6,13 @@ export function ProgressRing({
   challenge,
   tone,
   size = 96,
+  color,
 }: {
   challenge: Pick<Challenge, "current_count" | "target_count" | "title" | "status">;
   tone: "a" | "b";
   size?: number;
+  /** Overrides the tone's colour, e.g. the warning amber of a forfeit challenge (a CSS colour or variable). */
+  color?: string;
 }) {
   const stroke = Math.round(size * 0.11);
   const r = (size - stroke) / 2;
@@ -34,7 +37,7 @@ export function ProgressRing({
           cy={size / 2}
           r={r}
           fill="none"
-          stroke={done ? "var(--ok)" : `var(--${tone})`}
+          stroke={done ? "var(--ok)" : (color ?? `var(--${tone})`)}
           strokeWidth={stroke}
           strokeLinecap="round"
           strokeDasharray={c}

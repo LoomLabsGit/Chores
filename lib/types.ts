@@ -17,6 +17,9 @@ export type Profile = {
   created_at: string;
 };
 
+/** How a chore is priced: by the time it takes (plus a chore tax), or a fixed bounty whatever the time. */
+export type PricingType = "time_based" | "fixed_bounty";
+
 export type ChoreLibraryItem = {
   id: string;
   household_id: string;
@@ -27,6 +30,9 @@ export type ChoreLibraryItem = {
   default_points: number;
   /** Flat bonus points for dirty or unpleasant jobs (0-50). */
   chore_tax: number;
+  pricing_type: PricingType;
+  /** Points a fixed-bounty chore pays. Only used when pricing_type is "fixed_bounty". */
+  fixed_bounty_points: number;
   is_archived: boolean;
   last_used_at: string | null;
   created_at: string;
@@ -49,6 +55,8 @@ export type ChoreInstance = {
   /** Estimated minutes (multiple of 5). Points are worked out from this until the real time is logged. */
   estimated_duration: number;
   chore_tax: number;
+  pricing_type: PricingType;
+  fixed_bounty_points: number;
 };
 
 export type ChoreCompletion = {
@@ -66,7 +74,18 @@ export type ChoreCompletion = {
   created_at: string;
 };
 
-export type ChallengeStatus = "pending" | "active" | "completed" | "rejected";
+export type ChallengeStatus =
+  | "pending"
+  | "active"
+  | "completed"
+  | "rejected"
+  /** Ran out of time without a penalty (a reward challenge, or a proposal nobody accepted). */
+  | "expired"
+  /** A forfeit challenge that missed its deadline and was docked. */
+  | "expired_penalized";
+
+/** A reward challenge pays on success; a forfeit challenge costs points if the deadline is missed. */
+export type ChallengeType = "reward" | "forfeit";
 
 export type Challenge = {
   id: string;
@@ -80,6 +99,16 @@ export type Challenge = {
   status: ChallengeStatus;
   created_at: string;
   completed_at: string | null;
+  type: ChallengeType;
+  /** Shared by both partners: either can log progress and the reward is split 50/50. */
+  is_joint: boolean;
+  /** YYYY-MM-DD; settled after this day ends (on the household's clock). Required for a forfeit. */
+  deadline_date: string | null;
+  /** Points docked if a forfeit's deadline is missed. 0 for a reward challenge. */
+  penalty_points: number;
+  /** Joint challenges: each partner's contribution ("a" is the household creator). */
+  completed_by_a_count: number;
+  completed_by_b_count: number;
 };
 
 export type Reward = {
@@ -108,7 +137,8 @@ export type NotificationType =
   | "challenge_declined"
   | "challenge_completed"
   | "reward_redeemed"
-  | "points_adjusted";
+  | "points_adjusted"
+  | "challenge_expired";
 
 export type AppNotification = {
   id: string;

@@ -8,7 +8,7 @@ import {
   libraryCategories,
   type LibraryUsage,
 } from "@/lib/logic/library";
-import { calculatePoints } from "@/lib/logic/points";
+import { libraryPoints } from "@/lib/logic/points";
 import { useHousehold } from "@/lib/store/household-store";
 import type { ChoreLibraryItem } from "@/lib/types";
 import { Icon } from "../icons";
@@ -126,7 +126,8 @@ export function ManageView() {
 }
 
 function ChoreRow({ chore, usage, onOpen }: { chore: ChoreLibraryItem; usage: LibraryUsage | undefined; onOpen: () => void }) {
-  const pts = calculatePoints(chore.default_duration, chore.chore_tax);
+  const pts = libraryPoints(chore);
+  const mission = chore.pricing_type === "fixed_bounty";
   return (
     <button
       onClick={onOpen}
@@ -137,8 +138,14 @@ function ChoreRow({ chore, usage, onOpen }: { chore: ChoreLibraryItem; usage: Li
         <p className="truncate text-base font-extrabold">{chore.title}</p>
         <p className="mt-0.5 flex flex-wrap items-center gap-x-2 text-sm font-semibold text-muted">
           <span className="rounded-full bg-raised px-2 py-0.5 text-xs font-bold">{chore.category?.trim() || DEFAULT_CATEGORY}</span>
-          <span>{chore.default_duration} min</span>
-          {chore.chore_tax > 0 && <span>+{chore.chore_tax} tax</span>}
+          {mission ? (
+            <span className="font-bold text-gold">Fixed bounty</span>
+          ) : (
+            <>
+              <span>{chore.default_duration} min</span>
+              {chore.chore_tax > 0 && <span>+{chore.chore_tax} tax</span>}
+            </>
+          )}
         </p>
         <p className="mt-1 truncate text-xs font-semibold text-muted">{usage ? describeUsage(usage) : " "}</p>
       </div>

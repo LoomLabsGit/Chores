@@ -1,3 +1,5 @@
+import type { PricingType } from "@/lib/types";
+
 // Points are earned from TIME plus a flat "chore tax":
 //
 //   base points  = round(minutes / 5)          12 points per hour, 1 per 5 minutes
@@ -51,9 +53,34 @@ export function calculateSplit(totalDuration: number, totalPoints: number, perce
   };
 }
 
-/** Estimated reward for a scheduled chore (its "bounty"). */
-export const estimatePoints = (chore: { estimated_duration: number; chore_tax: number }) =>
-  calculatePoints(chore.estimated_duration, chore.chore_tax);
+// ---------------------------------------------------------------------------
+// Pricing models. A chore is either time-based (the formula above) or a fixed bounty: the points are the bounty,
+// whatever the time. For a bounty the logged minutes still count, but only for the hours in Stats. The split
+// applies to the bounty exactly as it does to time-based points (owner rounded, the other gets the remainder).
+// Mirrored by public.chore_total_points() in migration 0012; keep the two in step.
+// ---------------------------------------------------------------------------
+
+export const MIN_BOUNTY = 1;
+export const MAX_BOUNTY = 500;
+export const DEFAULT_BOUNTY = 15;
+export const BOUNTY_STEP = 5;
+
+export const clampBounty = (n: number) =>
+  Number.isFinite(n) ? Math.min(MAX_BOUNTY, Math.max(MIN_BOUNTY, Math.round(n))) : DEFAULT_BOUNTY;
+
+/** What decides a chore's points: the model, its bounty and its tax. */
+export type Pricing = { pricing_type: PricingType; fixed_bounty_points: number; chore_tax: number };
+
+/** Total points for a chore with `minutes` logged (or estimated). */
+export function choreTotal(minutes: number, pricing: Pricing): number {
+  return pricing.pricing_type === "fixed_bounty" ? pricing.fixed_bounty_points : calculatePoints(minutes, pricing.chore_tax);
+}
+
+/** Estimated reward for a scheduled chore (its "bounty pill"). Time-based: from the estimate. Fixed: the bounty. */
+export const estimatePoints = (chore: Pricing & { estimated_duration: number }) => choreTotal(chore.estimated_duration, chore);
+
+/** A library chore's usual reward. */
+export const libraryPoints = (chore: Pricing & { default_duration: number }) => choreTotal(chore.default_duration, chore);
 
 /** "Est. Reward: 15 mins (3 pts) + Tax (5 pts) = 8 pts" */
 export function describeReward(minutes: number, tax: number): string {

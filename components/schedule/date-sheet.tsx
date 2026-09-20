@@ -60,6 +60,8 @@ function DateForm({
           title: instance.title,
           minutes: instance.estimated_duration,
           tax: instance.chore_tax,
+          pricing: instance.pricing_type,
+          bounty: instance.fixed_bounty_points,
           assignedTo: instance.assigned_to,
           date,
           repeat: "none",

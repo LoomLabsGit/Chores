@@ -6,7 +6,7 @@ Next.js (App Router) + Tailwind on Vercel, Supabase for Postgres, Auth and Realt
 ## Setup
 
 1. **Supabase project.** Create one, then apply the schema: paste each file in `supabase/migrations/` into the SQL editor,
-   **in order** (`0001_init.sql` … `0010_challenge_controls.sql`), or use `supabase link` + `supabase db push`.
+   **in order** (`0001_init.sql` … `0013_forfeit_and_joint_challenges.sql`), or use `supabase link` + `supabase db push`.
    After the first setup, new migration files are applied for you (see below).
 2. **Auth.** Email + password. If "Confirm email" is on, add `https://YOUR-DOMAIN/auth/callback` (and
    `http://localhost:3000/auth/callback`) under Authentication → URL Configuration.
@@ -87,6 +87,29 @@ in order (`0004_…`) and should be additive; a migration runs against live data
   (after a confirmation) and takes the reward back. The ... menu adds Edit (name, target, reward, who it is for), Give/Take
   (reassigning asks the new person to accept, keeping progress), Reset progress and Delete (a finished challenge's reward is
   taken back). Only the person a challenge is for can add progress. Declined challenges stay visible so they can be managed.
+- **Point ledger** (migration 0011): every change to a balance is recorded in `point_ledger` (who, how much, the balance
+  after, why, and the completion / challenge / reward it relates to). Rows are written only by the server, through
+  `public.apply_points()`, which is also the one place the zero floor is enforced; clients can read their household's
+  ledger but never write. Existing balances get an "Opening balance" row so each chain adds up. There is no history
+  screen yet: the ledger is the audit trail behind the notifications.
+- **Fixed-bounty chores** (migration 0012): a chore is priced either **Time-Based** (minutes plus chore tax, as before) or
+  **Fixed Bounty**: it pays `fixed_bounty_points` whatever the time. For a bounty the logged minutes are still recorded, but
+  only for Stats. The split slider applies to the bounty (`round(bounty * share)` to the owner, the rest to the other person)
+  and minutes split along the same ratio. The model lives on library chores, scheduled chores and repeating series, so every
+  generated day keeps it. Editing a library chore pushes what changed; a tax change re-prices finished time-based copies, a
+  bounty change re-prices finished fixed copies, and switching model never rewrites history. Mirrored by
+  `public.chore_total_points()` and `lib/logic/points.ts` (`choreTotal`); keep the two in step.
+- **Forfeit challenges** (migration 0013): "hold the line". The target is how many repetitions are needed before the
+  deadline; succeeding earns nothing, missing it docks `penalty_points` (never below 0), writes a ledger line, notifies the
+  person and marks it `expired_penalized`. A forfeit needs a deadline and a penalty, is for one person, and one set for your
+  partner has to be accepted first. **Joint challenges** start active for both partners at once, either can log progress
+  (`completed_by_a/b_count` track who did what), and the reward is split `round(reward / 2)` each. Joint + forfeit is not
+  offered because it would dock a partner who never agreed. A reward challenge with a deadline that lapses just becomes
+  `expired` (no penalty). Deleting a finished challenge takes its reward back; deleting a missed forfeit refunds what was docked.
+- **Deadline settlement** runs when either partner opens the app (`settle_my_challenges`, for their own household) and, where
+  the database has the `pg_cron` extension, hourly on the server (`settle_challenges_core`). "Midnight" is the household's own
+  midnight, from `households.timezone` (default `Europe/London`; change it in the SQL editor if you live elsewhere). It is
+  idempotent, so running from both places is safe.
 - **"Profile switcher"** is a profile menu (members, invite code, sign out): each partner signs in on their own device, so
   there is nothing to switch between.
 - **Common tasks** are matched by title against the six base chores; **Recent** is the five most recently scheduled.

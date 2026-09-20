@@ -38,7 +38,7 @@ export function Segmented<T extends string>({
   onChange,
   label,
 }: {
-  options: { value: T; label: ReactNode }[];
+  options: { value: T; label: ReactNode; disabled?: boolean }[];
   value: T;
   onChange: (v: T) => void;
   label: string;
@@ -53,8 +53,10 @@ export function Segmented<T extends string>({
             type="button"
             role="radio"
             aria-checked={selected}
+            aria-disabled={o.disabled || undefined}
+            disabled={o.disabled}
             onClick={() => onChange(o.value)}
-            className={`flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl px-3 text-sm font-bold transition-colors ${
+            className={`flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl px-3 text-sm font-bold transition-colors disabled:opacity-40 ${
               selected ? "bg-surface text-ink shadow-card" : "text-muted"
             }`}
           >

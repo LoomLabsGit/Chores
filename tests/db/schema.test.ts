@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { PGlite } from "@electric-sql/pglite";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 const root = path.resolve(__dirname, "../..");
 const read = (p: string) => readFileSync(path.join(root, p), "utf8");
@@ -64,6 +64,9 @@ beforeAll(async () => {
   await db.exec(read("supabase/migrations/0008_manage_library.sql"));
   await db.exec(read("supabase/migrations/0009_dynamic_ledger.sql"));
   await db.exec(read("supabase/migrations/0010_challenge_controls.sql"));
+  await db.exec(read("supabase/migrations/0011_point_ledger.sql"));
+  await db.exec(read("supabase/migrations/0012_fixed_bounty_chores.sql"));
+  await db.exec(read("supabase/migrations/0013_forfeit_and_joint_challenges.sql"));
   for (const id of [ALEX, BLAKE, CASEY, DREW]) {
     await admin(`insert into auth.users (id, email) values ($1, $2)`, [id, `${id}@example.com`]);
   }
@@ -1181,7 +1184,7 @@ describe("dynamic ledger: editing a finished chore re-prices it and adjusts bala
   it("the internal calculation cannot be called directly", async () => {
     const id = await done(ALEX, 0, 30, 100);
     await expect(as(ALEX, `select * from public.reprice_completion($1, 60, 50, null, null)`, [id])).rejects.toThrow(/permission denied/);
-    await expect(as(ALEX, `select public.adjust_points($1, 1000)`, [ALEX])).rejects.toThrow(/permission denied/);
+    await expect(as(ALEX, `select public.apply_points($1, 1000, 'free points', null)`, [ALEX])).rejects.toThrow(/permission denied/);
   });
 
   it("a completion's split is stored, and the migration backfills older rows sensibly", async () => {
@@ -1421,5 +1424,680 @@ describe("challenge controls", () => {
     await expect(asAnon(`select * from public.update_challenge(gen_random_uuid(), 'x', 1, 1, gen_random_uuid())`)).rejects.toThrow(/permission denied/);
     await expect(asAnon(`select public.delete_challenge(gen_random_uuid())`)).rejects.toThrow(/permission denied/);
     await expect(as(ALEX, `select public.notify_points_adjusted($1, $1, null, 'x', 5)`, [BLAKE])).rejects.toThrow(/permission denied/);
+  });
+});
+
+// ===========================================================================
+// 0011 - the point ledger
+// ===========================================================================
+describe("point ledger", () => {
+  const bal = async (uid: string) => (await admin(`select points from public.profiles where id = $1`, [uid]))[0].points as number;
+  /** A marker for "rows written after this point": the newest sequence number so far. */
+  const now = async () => (await admin(`select coalesce(max(seq), 0)::int as s from public.point_ledger`))[0].s as number;
+  const rows = (uid: string, since: number) =>
+    admin<{ delta: number; balance_after: number; reason: string; reference_id: string | null }>(
+      `select delta, balance_after, reason, reference_id from public.point_ledger where profile_id = $1 and seq > $2 order by seq`,
+      [uid, since],
+    );
+  /** Every row's balance_after follows from the one before it, and the last one is the real balance. */
+  async function expectChain(uid: string, since: number, startBalance: number) {
+    const r = await rows(uid, since);
+    let running = startBalance;
+    for (const row of r) {
+      running += row.delta;
+      expect(row.balance_after).toBe(running);
+    }
+    expect(running).toBe(await bal(uid));
+    return r;
+  }
+
+  it("records each balance change with who, how much, the balance after, why and what it relates to", async () => {
+    const t0 = await now();
+    const a0 = await bal(ALEX);
+    const id = await chore(ALEX, "Ledgered", 4, ALEX, "2026-09-10"); // 30 min = 6 + 4
+    const [c] = await as(ALEX, `select * from public.complete_chore($1, 30, 100)`, [id]);
+    const r = await expectChain(ALEX, t0, a0);
+    expect(r).toEqual([{ delta: 10, balance_after: a0 + 10, reason: "Chore completed: Ledgered", reference_id: c.id }]);
+  });
+
+  it("keeps an unbroken chain through completing, editing, unchecking and deleting", async () => {
+    const [a0, b0] = [await bal(ALEX), await bal(BLAKE)];
+    const t0 = await now();
+    const id = await chore(ALEX, "Chain", 4, ALEX, "2026-09-10");
+    await as(ALEX, `select * from public.complete_chore($1, 30, 60)`, [id]); // Alex 6 / Blake 4
+    await as(ALEX, `select * from public.edit_completed_chore($1, 'Chain', $2, '2026-09-10', 45, null, null)`, [id, ALEX]); // 13: 8 / 5
+    await as(ALEX, `select public.uncomplete_chore($1)`, [id]);
+    const id2 = await chore(ALEX, "Chain 2", 0, ALEX, "2026-09-10");
+    await as(ALEX, `select * from public.complete_chore($1, 20, 100)`, [id2]);
+    await as(ALEX, `select public.remove_completed_chore($1)`, [id2]);
+    const ra = await expectChain(ALEX, t0, a0);
+    await expectChain(BLAKE, t0, b0);
+    expect(ra.map((x) => x.reason)).toEqual([
+      "Chore completed: Chain", "Chore edited: Chain", "Chore unchecked: Chain", "Chore completed: Chain 2", "Chore deleted: Chain 2",
+    ]);
+    expect(await bal(ALEX)).toBe(a0);
+  });
+
+  it("logs redeeming a reward against the reward, and refuses when the balance is short", async () => {
+    await admin(`update public.profiles set points = 100 where id = $1`, [ALEX]);
+    const t0 = await now();
+    const [reward] = await as(ALEX, `select id, title, cost from public.rewards where is_active order by cost limit 1`);
+    await as(ALEX, `select * from public.redeem_reward($1)`, [reward.id]);
+    const r = await expectChain(ALEX, t0, 100);
+    expect(r).toEqual([{ delta: -reward.cost, balance_after: 100 - reward.cost, reason: `Reward redeemed: ${reward.title}`, reference_id: reward.id }]);
+    await admin(`update public.profiles set points = 0 where id = $1`, [ALEX]);
+    await expect(as(ALEX, `select * from public.redeem_reward($1)`, [reward.id])).rejects.toThrow(/Not enough points/);
+  });
+
+  it("a debit that hits the floor records the REAL change, so the chain still adds up", async () => {
+    const id = await chore(ALEX, "Floor", 0, ALEX, "2026-09-10");
+    await as(ALEX, `select * from public.complete_chore($1, 60, 100)`, [id]); // +12
+    await admin(`update public.profiles set points = 5 where id = $1`, [ALEX]);
+    const t0 = await now();
+    await as(ALEX, `select public.uncomplete_chore($1)`, [id]); // would take 12, only 5 left
+    const r = await expectChain(ALEX, t0, 5);
+    expect(r).toEqual([expect.objectContaining({ delta: -5, balance_after: 0 })]);
+  });
+
+  it("partners can read the household's ledger; nobody can read another household's or write to it", async () => {
+    const id = await chore(ALEX, "Visible", 0, ALEX, "2026-09-10");
+    await as(ALEX, `select * from public.complete_chore($1, 10, 100)`, [id]);
+    const seenByBlake = await as(BLAKE, `select profile_id, reason from public.point_ledger where reason = 'Chore completed: Visible'`);
+    expect(seenByBlake).toEqual([{ profile_id: ALEX, reason: "Chore completed: Visible" }]);
+    expect(await as(DREW, `select 1 from public.point_ledger where reason = 'Chore completed: Visible'`)).toHaveLength(0);
+    await expect(as(ALEX, `insert into public.point_ledger (profile_id, delta, balance_after, reason) values ($1, 999, 999, 'x')`, [ALEX])).rejects.toThrow(/permission denied/);
+    await expect(as(ALEX, `update public.point_ledger set delta = 0`)).rejects.toThrow(/permission denied/);
+    await expect(as(ALEX, `delete from public.point_ledger`)).rejects.toThrow(/permission denied/);
+    await expect(asAnon(`select * from public.point_ledger`)).rejects.toThrow(/permission denied/);
+  });
+
+  it("gives balances that already existed an opening row (the migration's own backfill)", async () => {
+    await admin(`delete from public.point_ledger where profile_id = $1`, [DREW]);
+    await admin(`update public.profiles set points = 42 where id = $1`, [DREW]);
+    const sql = read("supabase/migrations/0011_point_ledger.sql");
+    const backfill = sql.slice(sql.indexOf("insert into public.point_ledger (profile_id, delta, balance_after, reason)\nselect"), sql.indexOf("-- ---", sql.indexOf("insert into public.point_ledger (profile_id, delta")));
+    await admin(backfill.replace(/;\s*$/, "") + " on conflict do nothing");
+    const drew = await admin(`select delta, balance_after, reason from public.point_ledger where profile_id = $1`, [DREW]);
+    expect(drew).toEqual([{ delta: 42, balance_after: 42, reason: "Opening balance (before the ledger)" }]);
+  });
+
+  it("the balance helper is internal", async () => {
+    await expect(as(ALEX, `select public.apply_points($1, 5, 'x', null)`, [ALEX])).rejects.toThrow(/permission denied/);
+  });
+});
+
+// ===========================================================================
+// 0012 - fixed-bounty chores
+// ===========================================================================
+describe("fixed-bounty chores", () => {
+  const bal = async (uid: string) => (await admin(`select points from public.profiles where id = $1`, [uid]))[0].points as number;
+  const dayFromNow = async (n: number) => (await admin(`select (current_date + $1::int)::text as d`, [n]))[0].d as string;
+
+  /** A scheduled mission: fixed bounty, with an estimate that must play no part in the points. */
+  async function mission(user: string, title: string, bounty: number, who: string | null = user, date = "2026-09-10", tax = 0) {
+    const [row] = await as(
+      user,
+      `insert into public.chore_instances (title, household_id, assigned_to, scheduled_date, estimated_duration, chore_tax, pricing_type, fixed_bounty_points)
+       values ($1, public.current_household_id(), $2, $3, 15, $4, 'fixed_bounty', $5) returning id`,
+      [title, who, date, tax, bounty],
+    );
+    return row.id as string;
+  }
+  const comp = async (id: string) => (await admin(`select * from public.chore_completions where instance_id = $1`, [id]))[0];
+
+  it("pays the bounty whatever the time logged, and still records the minutes for Stats", async () => {
+    const a0 = await bal(ALEX);
+    const id = await mission(ALEX, "Video editing", 25);
+    const [c] = await as(ALEX, `select * from public.complete_chore($1, 180, 100)`, [id]); // three hours
+    expect(c).toMatchObject({ total_duration_minutes: 180, user_a_duration: 180, user_a_points: 25, user_b_points: 0 });
+    expect(await bal(ALEX)).toBe(a0 + 25);
+    const id2 = await mission(ALEX, "Video editing 2", 25);
+    const [c2] = await as(ALEX, `select * from public.complete_chore($1, 5, 100)`, [id2]); // five minutes
+    expect(c2.user_a_points).toBe(25);
+  });
+
+  it("matches the spec's worked example: 45 min, 20 pts, 70/30 -> 32 min / 14 pts and 13 min / 6 pts", async () => {
+    const [a0, b0] = [await bal(ALEX), await bal(BLAKE)];
+    const id = await mission(ALEX, "Video Editing", 20);
+    const [c] = await as(ALEX, `select * from public.complete_chore($1, 45, 70)`, [id]);
+    expect(c).toMatchObject({ user_a_duration: 32, user_a_points: 14, user_b_duration: 13, user_b_points: 6, total_duration_minutes: 45, owner_percent: 70 });
+    expect([await bal(ALEX) - a0, await bal(BLAKE) - b0]).toEqual([14, 6]);
+  });
+
+  it("splits exactly for every bounty and share, and ignores any chore tax on a mission", async () => {
+    for (const bounty of [1, 7, 15, 25, 99]) {
+      for (const pct of [0, 10, 30, 50, 70, 100]) {
+        const id = await mission(ALEX, `Sum ${bounty}/${pct}`, bounty, ALEX, "2026-09-10", 9); // tax 9 must not count
+        const [c] = await as(ALEX, `select * from public.complete_chore($1, 35, $2)`, [id, pct]);
+        expect(c.user_a_points + c.user_b_points).toBe(bounty);
+        expect(c.user_a_points).toBe(Math.round((bounty * pct) / 100));
+        expect(c.user_a_duration + c.user_b_duration).toBe(35);
+      }
+    }
+  });
+
+  it("still validates the logged time and the split", async () => {
+    const id = await mission(ALEX, "Validate mission", 20);
+    await expect(as(ALEX, `select * from public.complete_chore($1, 7, 100)`, [id])).rejects.toThrow(/multiple of 5/);
+    await expect(as(ALEX, `select * from public.complete_chore($1, 30, 55)`, [id])).rejects.toThrow(/multiple of 10/);
+  });
+
+  it("rejects an out-of-range bounty", async () => {
+    await expect(mission(ALEX, "Zero", 0)).rejects.toThrow(/check constraint/);
+    await expect(mission(ALEX, "Huge", 501)).rejects.toThrow(/check constraint/);
+  });
+
+  it("re-pricing a finished mission: time changes only redistribute minutes; a bounty change moves the balance", async () => {
+    const [a0, b0] = [await bal(ALEX), await bal(BLAKE)];
+    const id = await mission(ALEX, "Reprice mission", 20);
+    await as(ALEX, `select * from public.complete_chore($1, 45, 70)`, [id]); // 14 / 6
+    const timeOnly = await as(ALEX, `select * from public.edit_completed_chore($1, 'Reprice mission', $2, '2026-09-10', 90, null, null, null)`, [id, ALEX]);
+    expect(timeOnly.every((r) => r.o_delta === 0)).toBe(true); // re-priced, but nobody's balance moves
+    expect(await comp(id)).toMatchObject({ total_duration_minutes: 90, user_a_points: 14, user_b_points: 6, user_a_duration: 63 });
+
+    const rows = await as(ALEX, `select * from public.edit_completed_chore($1, 'Reprice mission', $2, '2026-09-10', null, null, null, 30)`, [id, ALEX]);
+    expect(Object.fromEntries(rows.map((r) => [r.o_user, r.o_delta]))).toEqual({ [ALEX]: 7, [BLAKE]: 3 }); // 30 -> 21 / 9
+    expect(await comp(id)).toMatchObject({ user_a_points: 21, user_b_points: 9 });
+    expect([await bal(ALEX) - a0, await bal(BLAKE) - b0]).toEqual([21, 9]);
+    expect((await admin(`select fixed_bounty_points from public.chore_instances where id = $1`, [id]))[0].fixed_bounty_points).toBe(30);
+  });
+
+  it("the wrong kind of value never re-prices: a tax on a mission and a bounty on a time-based chore are ignored", async () => {
+    const m = await mission(ALEX, "Ignore tax", 20);
+    await as(ALEX, `select * from public.complete_chore($1, 30, 100)`, [m]);
+    expect(await as(ALEX, `select * from public.edit_completed_chore($1, 'Ignore tax', $2, '2026-09-10', null, 50, null, null)`, [m, ALEX])).toEqual([]);
+    expect((await comp(m)).user_a_points).toBe(20);
+
+    const t = await chore(ALEX, "Ignore bounty", 4, ALEX, "2026-09-10"); // 30 min = 6 + 4
+    await as(ALEX, `select * from public.complete_chore($1, 30, 100)`, [t]);
+    expect(await as(ALEX, `select * from public.edit_completed_chore($1, 'Ignore bounty', $2, '2026-09-10', null, null, null, 400)`, [t, ALEX])).toEqual([]);
+    expect((await comp(t)).user_a_points).toBe(10);
+  });
+
+  it("the library remembers the model; a mission has no chore tax", async () => {
+    const [row] = await as(ALEX, `select * from public.create_library_chore('Detail the car', 'Car', 60, 9, 'fixed_bounty', 40)`);
+    expect(row).toMatchObject({ pricing_type: "fixed_bounty", fixed_bounty_points: 40, chore_tax: 0, default_duration: 60 });
+    const [plain] = await as(ALEX, `select * from public.create_library_chore('Plain new', 'Car', 15, 3)`);
+    expect(plain).toMatchObject({ pricing_type: "time_based", fixed_bounty_points: 15, chore_tax: 3 });
+    await expect(as(ALEX, `select * from public.create_library_chore('Bad bounty', 'x', 15, 0, 'fixed_bounty', 0)`)).rejects.toThrow(/between 1 and 500/);
+  });
+
+  it("a library bounty change reaches unfinished copies and re-prices finished missions, leaving time-based history alone", async () => {
+    const [lib] = await as(ALEX, `select * from public.create_library_chore('Bounty push', 'x', 15, 0, 'fixed_bounty', 20)`);
+    const copy = async (date: string) =>
+      (await as(ALEX, `insert into public.chore_instances (chore_id, title, household_id, assigned_to, scheduled_date, pricing_type, fixed_bounty_points)
+                       values ($1, 'Bounty push', public.current_household_id(), $2, $3, 'fixed_bounty', 20) returning id`, [lib.id, ALEX, date]))[0].id as string;
+    const open = await copy(await dayFromNow(3));
+    const finished = await copy("2026-09-10");
+    await as(ALEX, `select * from public.complete_chore($1, 30, 100)`, [finished]); // 20
+    // A time-based finished copy of the same library chore (history from before it became a mission).
+    const oldStyle = (await as(ALEX, `insert into public.chore_instances (chore_id, title, household_id, assigned_to, scheduled_date, estimated_duration, chore_tax, pricing_type)
+                                      values ($1, 'Bounty push', public.current_household_id(), $2, '2026-09-09', 15, 2, 'time_based') returning id`, [lib.id, ALEX]))[0].id as string;
+    await as(ALEX, `select * from public.complete_chore($1, 30, 100)`, [oldStyle]); // 6 + 2
+    const a0 = await bal(ALEX);
+
+    const [r] = await as(ALEX, `select * from public.update_library_chore($1, 'Bounty push', 'x', 15, 0, true, null, 35)`, [lib.id]);
+    expect(r).toMatchObject({ n_open: 1, n_done: 1, my_delta: 15 });
+    expect((await admin(`select fixed_bounty_points p from public.chore_instances where id = $1`, [open]))[0].p).toBe(35);
+    expect((await comp(finished)).user_a_points).toBe(35);
+    expect((await comp(oldStyle)).user_a_points).toBe(8); // untouched
+    expect(await bal(ALEX)).toBe(a0 + 15);
+  });
+
+  it("switching a library chore's model changes what is planned, never what was paid", async () => {
+    const [lib] = await as(ALEX, `select * from public.create_library_chore('Switch model', 'x', 30, 4)`); // time-based
+    const inst = async (date: string) =>
+      (await as(ALEX, `insert into public.chore_instances (chore_id, title, household_id, assigned_to, scheduled_date, estimated_duration, chore_tax)
+                       values ($1, 'Switch model', public.current_household_id(), $2, $3, 30, 4) returning id`, [lib.id, ALEX, date]))[0].id as string;
+    const open = await inst(await dayFromNow(2));
+    const finished = await inst("2026-09-10");
+    await as(ALEX, `select * from public.complete_chore($1, 30, 100)`, [finished]); // 6 + 4
+    const a0 = await bal(ALEX);
+
+    const [r] = await as(ALEX, `select * from public.update_library_chore($1, 'Switch model', 'x', 30, 4, true, 'fixed_bounty', 50)`, [lib.id]);
+    expect(r).toMatchObject({ n_open: 1, n_done: 0, my_delta: 0 });
+    expect((await admin(`select pricing_type, fixed_bounty_points from public.chore_instances where id = $1`, [open]))[0]).toEqual({ pricing_type: "fixed_bounty", fixed_bounty_points: 50 });
+    expect((await admin(`select pricing_type from public.chore_instances where id = $1`, [finished]))[0].pricing_type).toBe("time_based");
+    expect((await comp(finished)).user_a_points).toBe(10);
+    expect(await bal(ALEX)).toBe(a0);
+  });
+
+  it("can leave finished missions alone when told not to re-price", async () => {
+    const [lib] = await as(ALEX, `select * from public.create_library_chore('No reprice', 'x', 15, 0, 'fixed_bounty', 20)`);
+    const id = (await as(ALEX, `insert into public.chore_instances (chore_id, title, household_id, assigned_to, scheduled_date, pricing_type, fixed_bounty_points)
+                                values ($1, 'No reprice', public.current_household_id(), $2, '2026-09-10', 'fixed_bounty', 20) returning id`, [lib.id, ALEX]))[0].id as string;
+    await as(ALEX, `select * from public.complete_chore($1, 30, 100)`, [id]);
+    const [r] = await as(ALEX, `select * from public.update_library_chore($1, 'No reprice', 'x', 15, 0, false, null, 60)`, [lib.id]);
+    expect(r).toMatchObject({ n_done: 0, my_delta: 0 });
+    expect((await comp(id)).user_a_points).toBe(20);
+  });
+
+  it("repeating missions keep their bounty on every generated day, and this-and-future can change it", async () => {
+    const start = await dayFromNow(1);
+    const id = await mission(ALEX, "Weekly mission", 25, ALEX, start);
+    await as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [id]);
+    const sid = (await admin(`select parent_recurrence_id from public.chore_instances where id = $1`, [id]))[0].parent_recurrence_id;
+    const shape = () => admin(`select distinct pricing_type::text p, fixed_bounty_points b from public.chore_instances where parent_recurrence_id = $1`, [sid]);
+    expect(await shape()).toEqual([{ p: "fixed_bounty", b: 25 }]);
+
+    await as(ALEX, `select public.extend_recurring_chores(current_date + 300)`); // generated later on
+    expect(await shape()).toEqual([{ p: "fixed_bounty", b: 25 }]);
+
+    await as(ALEX, `select public.update_chore_series($1, 'Weekly mission', 15, 0, $2, 'weekly', 'fixed_bounty', 40)`, [id, ALEX]);
+    expect(await shape()).toEqual([{ p: "fixed_bounty", b: 40 }]);
+    await as(ALEX, `select public.extend_recurring_chores(current_date + 500)`);
+    expect(await shape()).toEqual([{ p: "fixed_bounty", b: 40 }]);
+  });
+
+  it("an old-style series call (no pricing) keeps the series' model", async () => {
+    const id = await mission(ALEX, "Keep model", 25, ALEX, await dayFromNow(1));
+    await as(ALEX, `select public.make_chore_recurring($1, 'weekly')`, [id]);
+    await as(ALEX, `select public.update_chore_series($1, 'Keep model 2', 15, 0, $2, 'weekly')`, [id, ALEX]);
+    const sid = (await admin(`select parent_recurrence_id from public.chore_instances where id = $1`, [id]))[0].parent_recurrence_id;
+    expect(await admin(`select distinct pricing_type::text p, fixed_bounty_points b, title from public.chore_instances where parent_recurrence_id = $1`, [sid])).toEqual([{ p: "fixed_bounty", b: 25, title: "Keep model 2" }]);
+  });
+
+  it("uncheck takes back exactly a mission's bounty", async () => {
+    const a0 = await bal(ALEX);
+    const id = await mission(ALEX, "Undo mission", 33);
+    await as(ALEX, `select * from public.complete_chore($1, 60, 100)`, [id]);
+    await as(ALEX, `select public.uncomplete_chore($1)`, [id]);
+    expect(await bal(ALEX)).toBe(a0);
+  });
+});
+
+// ===========================================================================
+// 0013 - joint and forfeit challenges, and settlement of deadlines
+// ===========================================================================
+describe("joint challenges", () => {
+  const bal = async (uid: string) => (await admin(`select points from public.profiles where id = $1`, [uid]))[0].points as number;
+  const row = async (id: string) => (await admin(`select * from public.challenges where id = $1`, [id]))[0];
+  const joint = async (creator: string, target = 3, reward = 20, title = "Walk together", deadline: string | null = null) =>
+    (await as(creator, `select * from public.create_challenge($1, $2, $3, $4, 'reward', true, $5, 0)`, [title, creator, target, reward, deadline]))[0].id as string;
+  const tap = (user: string, id: string) => as(user, `select * from public.increment_challenge($1)`, [id]);
+  const setP = (user: string, id: string, n: number) => as(user, `select * from public.set_challenge_progress($1, $2)`, [id, n]);
+  const notes = (uid: string, id: string, type: string) =>
+    as(uid, `select message from public.notifications where reference_id = $1 and type = $2`, [id, type]);
+
+  it("starts active for both partners at once, with no acceptance step, and tells the partner", async () => {
+    const id = await joint(ALEX);
+    expect(await row(id)).toMatchObject({ is_joint: true, status: "active", type: "reward", assigned_to: ALEX, creator_id: ALEX, completed_by_a_count: 0, completed_by_b_count: 0 });
+    expect(await as(BLAKE, `select 1 from public.challenges where id = $1`, [id])).toHaveLength(1);
+    expect(await notes(BLAKE, id, "challenge_proposed")).toEqual([{ message: "Alex started a joint challenge with you: Walk together" }]);
+    await expect(as(BLAKE, `select * from public.respond_to_challenge($1, true)`, [id])).rejects.toThrow(/No pending challenge/); // nothing to accept
+  });
+
+  it("needs a partner", async () => {
+    await expect(as(DREW, `select * from public.create_challenge('Solo joint', $1, 3, 20, 'reward', true, null, 0)`, [DREW])).rejects.toThrow(/Invite your partner/);
+  });
+
+  it("either partner can log a repetition, and each one's contribution is tracked", async () => {
+    const id = await joint(ALEX, 5);
+    await tap(ALEX, id); await tap(BLAKE, id); await tap(BLAKE, id);
+    expect(await row(id)).toMatchObject({ current_count: 3, completed_by_a_count: 1, completed_by_b_count: 2, status: "active" });
+    await expect(as(DREW, `select * from public.increment_challenge($1)`, [id])).rejects.toThrow(/not active for you/);
+  });
+
+  it("completing pays each partner round(reward / 2), through the ledger, and tells the partner", async () => {
+    const [a0, b0] = [await bal(ALEX), await bal(BLAKE)];
+    const id = await joint(ALEX, 2, 15); // odd reward: 15 -> 8 each (the spec's round(reward/2))
+    await tap(ALEX, id);
+    const done = (await tap(BLAKE, id))[0];
+    expect(done).toMatchObject({ status: "completed", current_count: 2, completed_by_a_count: 1, completed_by_b_count: 1 });
+    expect([await bal(ALEX) - a0, await bal(BLAKE) - b0]).toEqual([8, 8]);
+    const ledger = await admin(`select profile_id, delta, reason from public.point_ledger where reference_id = $1 order by seq`, [id]);
+    expect(ledger).toEqual([
+      { profile_id: ALEX, delta: 8, reason: "Challenge completed: Walk together" },
+      { profile_id: BLAKE, delta: 8, reason: "Challenge completed: Walk together" },
+    ].sort((x, y) => ledger.findIndex((l) => l.profile_id === x.profile_id) - ledger.findIndex((l) => l.profile_id === y.profile_id)));
+    expect(await notes(ALEX, id, "challenge_completed")).toEqual([{ message: "Blake finished your joint challenge: Walk together - you each earn 8 pts" }]);
+    expect(await notes(BLAKE, id, "challenge_completed")).toHaveLength(0); // the one who finished it is not told about their own tap
+  });
+
+  it("an even reward splits exactly in half", async () => {
+    const [a0, b0] = [await bal(ALEX), await bal(BLAKE)];
+    const id = await joint(BLAKE, 1, 20);
+    await tap(BLAKE, id);
+    expect([await bal(ALEX) - a0, await bal(BLAKE) - b0]).toEqual([10, 10]);
+  });
+
+  it("the - button takes progress off the person pressing it first, then their partner, and reopening takes both halves back", async () => {
+    const [a0, b0] = [await bal(ALEX), await bal(BLAKE)];
+    const id = await joint(ALEX, 3, 20);
+    await tap(ALEX, id); await tap(ALEX, id); await tap(BLAKE, id); // a=2, b=1 -> done
+    expect(await row(id)).toMatchObject({ status: "completed", completed_by_a_count: 2, completed_by_b_count: 1 });
+    expect([await bal(ALEX) - a0, await bal(BLAKE) - b0]).toEqual([10, 10]);
+
+    const reopened = (await setP(BLAKE, id, 2))[0]; // Blake presses -
+    expect(reopened).toMatchObject({ status: "active", current_count: 2, completed_by_a_count: 2, completed_by_b_count: 0, completed_at: null });
+    expect([await bal(ALEX) - a0, await bal(BLAKE) - b0]).toEqual([0, 0]);
+
+    const lower = (await setP(BLAKE, id, 1))[0]; // Blake has nothing left of their own: comes off Alex's
+    expect(lower).toMatchObject({ current_count: 1, completed_by_a_count: 1, completed_by_b_count: 0 });
+    const reset = (await setP(ALEX, id, 0))[0];
+    expect(reset).toMatchObject({ current_count: 0, completed_by_a_count: 0, completed_by_b_count: 0 });
+  });
+
+  it("either partner can add progress with the set function on a joint challenge, and a finished one is not paid twice", async () => {
+    const a0 = await bal(ALEX);
+    const id = await joint(ALEX, 2, 20);
+    await setP(BLAKE, id, 1);
+    expect(await row(id)).toMatchObject({ completed_by_b_count: 1, completed_by_a_count: 0 });
+    await setP(BLAKE, id, 2);
+    expect(await bal(ALEX)).toBe(a0 + 10);
+    await setP(ALEX, id, 2); // already done: no change
+    expect(await bal(ALEX)).toBe(a0 + 10);
+  });
+
+  it("a joint challenge cannot be handed to one person; changing the reward adjusts both by the difference in halves", async () => {
+    const [a0, b0] = [await bal(ALEX), await bal(BLAKE)];
+    const id = await joint(ALEX, 1, 20);
+    await tap(ALEX, id);
+    await expect(as(ALEX, `select * from public.update_challenge($1, 'x', 1, 20, $2)`, [id, BLAKE])).rejects.toThrow(/belongs to both/);
+    await as(BLAKE, `select * from public.update_challenge($1, 'Walk together', 1, 30, $2)`, [id, ALEX]); // 10 each -> 15 each
+    expect([await bal(ALEX) - a0, await bal(BLAKE) - b0]).toEqual([15, 15]);
+    expect(await notes(ALEX, id, "points_adjusted")).toHaveLength(1);
+  });
+
+  it("deleting a finished joint challenge takes both halves back", async () => {
+    const [a0, b0] = [await bal(ALEX), await bal(BLAKE)];
+    const id = await joint(ALEX, 1, 20);
+    await tap(ALEX, id);
+    expect((await as(BLAKE, `select public.delete_challenge($1) as taken`, [id]))[0].taken).toBe(20);
+    expect([await bal(ALEX) - a0, await bal(BLAKE) - b0]).toEqual([0, 0]);
+  });
+
+  it("joint and forfeit cannot be combined", async () => {
+    await expect(as(ALEX, `select * from public.create_challenge('x', $1, 3, 0, 'forfeit', true, current_date + 5, 10)`, [ALEX])).rejects.toThrow(/one person/);
+  });
+});
+
+describe("forfeit challenges and settlement", () => {
+  // Earlier tests leave expired-but-unsettled challenges behind; settle them first so each test starts clean.
+  beforeEach(async () => {
+    await as(ALEX, `select public.settle_my_challenges()`);
+    await as(DREW, `select public.settle_my_challenges()`);
+  });
+  const bal = async (uid: string) => (await admin(`select points from public.profiles where id = $1`, [uid]))[0].points as number;
+  const setBal = (uid: string, n: number) => admin(`update public.profiles set points = $2 where id = $1`, [uid, n]);
+  const row = async (id: string) => (await admin(`select * from public.challenges where id = $1`, [id]))[0];
+  const today = async (tz = "Europe/London") => (await admin(`select (now() at time zone $1)::date::text as d`, [tz]))[0].d as string;
+  const addDays = async (d: string, n: number) => (await admin(`select ($1::date + $2::int)::text as d`, [d, n]))[0].d as string;
+  const forfeit = async (creator: string, who: string, opts: { target?: number; penalty?: number; days?: number; title?: string } = {}) =>
+    (await as(
+      creator,
+      `select * from public.create_challenge($1, $2, $3, 0, 'forfeit', false, $4::date, $5)`,
+      [opts.title ?? "Wash up before bed", who, opts.target ?? 3, await addDays(await today(), opts.days ?? 3), opts.penalty ?? 10],
+    ))[0].id as string;
+  /** Pretend the deadline has just passed (creation refuses a deadline in the past). */
+  const expire = async (id: string, daysAgo = 1, tz = "Europe/London") =>
+    admin(`update public.challenges set deadline_date = ($2::date - $3::int) where id = $1`, [id, await today(tz), daysAgo]);
+  const settle = (user: string) => as(user, `select public.settle_my_challenges() as n`);
+  const notes = (uid: string, id: string) =>
+    as(uid, `select type, message from public.notifications where reference_id = $1 and type = 'challenge_expired'`, [id]);
+  const ledger = (id: string) =>
+    admin(`select profile_id, delta, balance_after, reason from public.point_ledger where reference_id = $1 order by seq`, [id]);
+
+  it("needs a deadline and a penalty, earns nothing, and the deadline cannot already have passed", async () => {
+    const id = await forfeit(ALEX, ALEX);
+    expect(await row(id)).toMatchObject({ type: "forfeit", reward_points: 0, penalty_points: 10, is_joint: false, status: "active" });
+    await expect(as(ALEX, `select * from public.create_challenge('x', $1, 3, 0, 'forfeit', false, null, 10)`, [ALEX])).rejects.toThrow(/needs a deadline/);
+    await expect(as(ALEX, `select * from public.create_challenge('x', $1, 3, 0, 'forfeit', false, current_date + 3, 0)`, [ALEX])).rejects.toThrow(/between 1 and 500/);
+    await expect(as(ALEX, `select * from public.create_challenge('x', $1, 3, 0, 'forfeit', false, current_date + 3, 501)`, [ALEX])).rejects.toThrow(/between 1 and 500/);
+    await expect(as(ALEX, `select * from public.create_challenge('x', $1, 3, 0, 'forfeit', false, current_date - 5, 10)`, [ALEX])).rejects.toThrow(/has not passed/);
+    // a reward number sent along with a forfeit is ignored
+    const [sneaky] = await as(ALEX, `select * from public.create_challenge('Sneaky', $1, 3, 400, 'forfeit', false, current_date + 3, 10)`, [ALEX]);
+    expect(sneaky.reward_points).toBe(0);
+  });
+
+  it("the database refuses a forfeit without a deadline or penalty even if something writes one directly", async () => {
+    const insert = (extra: string) =>
+      admin(
+        `insert into public.challenges (household_id, creator_id, assigned_to, title, target_count, reward_points, type, status, ${extra.split("|")[0]})
+         values ((select household_id from public.profiles where id = $1), $1, $1, 'x', 3, 0, 'forfeit', 'active', ${extra.split("|")[1]})`,
+        [ALEX],
+      );
+    await expect(insert("penalty_points|10")).rejects.toThrow(/challenges_forfeit_shape/); // no deadline
+    await expect(insert("deadline_date|current_date + 3")).rejects.toThrow(/challenges_forfeit_shape/); // no penalty
+    await expect(insert("deadline_date, penalty_points, is_joint|current_date + 3, 10, true")).rejects.toThrow(/challenges_forfeit_shape/); // joint
+    await insert("deadline_date, penalty_points|current_date + 3, 10"); // a valid one is accepted
+  });
+
+  it("a forfeit set for your partner has to be accepted first, and says it is a forfeit", async () => {
+    const id = await forfeit(ALEX, BLAKE);
+    expect(await row(id)).toMatchObject({ status: "pending" });
+    expect((await as(BLAKE, `select message from public.notifications where reference_id = $1 and type = 'challenge_proposed'`, [id]))[0].message)
+      .toBe("Alex set a forfeit challenge for you: Wash up before bed");
+    expect((await settle(ALEX))[0].n).toBeGreaterThanOrEqual(0);
+    expect((await row(id)).status).toBe("pending"); // before its deadline nothing happens
+    await as(BLAKE, `select * from public.respond_to_challenge($1, true)`, [id]);
+    expect((await row(id)).status).toBe("active");
+  });
+
+  it("holding the line: reaching the target in time completes it with no points and no ledger entry", async () => {
+    const a0 = await bal(ALEX);
+    const id = await forfeit(ALEX, ALEX, { target: 2 });
+    await as(ALEX, `select * from public.increment_challenge($1)`, [id]);
+    expect((await as(ALEX, `select * from public.increment_challenge($1)`, [id]))[0].status).toBe("completed");
+    expect(await bal(ALEX)).toBe(a0);
+    expect(await ledger(id)).toEqual([]);
+    await expire(id); // even once the deadline passes, a completed forfeit is left alone
+    expect((await settle(ALEX))[0].n).toBe(0);
+    expect((await row(id)).status).toBe("completed");
+  });
+
+  it("a partner is told when their forfeit was held", async () => {
+    const id = await forfeit(ALEX, BLAKE, { target: 1 });
+    await as(BLAKE, `select * from public.respond_to_challenge($1, true)`, [id]);
+    await as(BLAKE, `select * from public.increment_challenge($1)`, [id]);
+    expect((await as(ALEX, `select message from public.notifications where reference_id = $1 and type = 'challenge_completed'`, [id]))[0].message)
+      .toBe("Blake held the line on your forfeit challenge: Wash up before bed");
+  });
+
+  it("missing the deadline docks the penalty from the assignee only, logs it, notifies them and marks it expired_penalized", async () => {
+    await setBal(ALEX, 50); await setBal(BLAKE, 50);
+    const id = await forfeit(ALEX, ALEX, { target: 3, penalty: 10 });
+    await as(ALEX, `select * from public.increment_challenge($1)`, [id]); // 1 of 3: not enough
+    await expire(id);
+    expect((await settle(ALEX))[0].n).toBeGreaterThanOrEqual(1);
+    expect((await row(id)).status).toBe("expired_penalized");
+    expect([await bal(ALEX), await bal(BLAKE)]).toEqual([40, 50]);
+    expect(await ledger(id)).toEqual([{ profile_id: ALEX, delta: -10, balance_after: 40, reason: "Missed deadline for challenge: Wash up before bed" }]);
+    expect(await notes(ALEX, id)).toEqual([{ type: "challenge_expired", message: "Deadline passed: Wash up before bed. 10 points were deducted." }]);
+    expect(await notes(BLAKE, id)).toHaveLength(0);
+  });
+
+  it("a forfeit your partner set for you docks YOU when missed, never the person who set it", async () => {
+    await setBal(ALEX, 50); await setBal(BLAKE, 50);
+    const id = await forfeit(ALEX, BLAKE, { penalty: 15 }); // Alex sets it; Blake accepts
+    await as(BLAKE, `select * from public.respond_to_challenge($1, true)`, [id]);
+    await expire(id);
+    await settle(ALEX); // either partner opening the app settles it
+    expect([await bal(ALEX), await bal(BLAKE)]).toEqual([50, 35]);
+    expect((await ledger(id)).map((l) => [l.profile_id, l.delta])).toEqual([[BLAKE, -15]]);
+    expect(await notes(BLAKE, id)).toHaveLength(1);
+    expect(await notes(ALEX, id)).toHaveLength(0);
+  });
+
+  it("is idempotent: settling again does not dock twice", async () => {
+    await setBal(ALEX, 50);
+    const id = await forfeit(ALEX, ALEX, { penalty: 7 });
+    await expire(id);
+    await settle(ALEX);
+    expect(await bal(ALEX)).toBe(43);
+    expect((await settle(ALEX))[0].n).toBe(0);
+    expect((await settle(BLAKE))[0].n).toBe(0);
+    expect(await bal(ALEX)).toBe(43);
+    expect(await ledger(id)).toHaveLength(1);
+  });
+
+  it("settles only once the deadline day is over: on the deadline day itself the challenge is still open", async () => {
+    await setBal(ALEX, 50);
+    const id = await forfeit(ALEX, ALEX, { penalty: 10 });
+    await expire(id, 0); // deadline = today
+    expect((await row(id)).status).toBe("active");
+    await settle(ALEX);
+    expect((await row(id)).status).toBe("active");
+    expect(await bal(ALEX)).toBe(50);
+    await as(ALEX, `select * from public.increment_challenge($1)`, [id]); // still loggable on the day
+    await expire(id, 1);
+    await settle(ALEX);
+    expect((await row(id)).status).toBe("expired_penalized");
+  });
+
+  it("never takes a balance below zero, and says what really happened", async () => {
+    await setBal(ALEX, 3);
+    const short = await forfeit(ALEX, ALEX, { penalty: 10, title: "Short" });
+    await expire(short);
+    await settle(ALEX);
+    expect(await bal(ALEX)).toBe(0);
+    expect(await ledger(short)).toEqual([{ profile_id: ALEX, delta: -3, balance_after: 0, reason: "Missed deadline for challenge: Short" }]);
+    expect(await notes(ALEX, short)).toEqual([{ type: "challenge_expired", message: "Deadline passed: Short. 3 points were deducted." }]);
+
+    const empty = await forfeit(ALEX, ALEX, { penalty: 10, title: "Empty" });
+    await expire(empty);
+    await settle(ALEX);
+    expect(await ledger(empty)).toEqual([{ profile_id: ALEX, delta: 0, balance_after: 0, reason: "Missed deadline for challenge: Empty" }]); // still on record
+    expect(await notes(ALEX, empty)).toEqual([{ type: "challenge_expired", message: "Deadline passed: Empty. Your balance was already 0, so nothing was deducted." }]);
+
+    await setBal(ALEX, 5);
+    const one = await forfeit(ALEX, ALEX, { penalty: 1, title: "One" });
+    await expire(one);
+    await settle(ALEX);
+    expect((await notes(ALEX, one))[0].message).toBe("Deadline passed: One. 1 point was deducted.");
+  });
+
+  it("progress, acceptance and reopening all stop once the deadline has passed", async () => {
+    const running = await forfeit(ALEX, ALEX);
+    await expire(running);
+    await expect(as(ALEX, `select * from public.increment_challenge($1)`, [running])).rejects.toThrow(/deadline .* has passed/);
+    await expect(as(ALEX, `select * from public.set_challenge_progress($1, 2)`, [running])).rejects.toThrow(/deadline .* has passed/);
+    await as(ALEX, `select * from public.set_challenge_progress($1, 0)`, [running]); // taking progress away is still fine
+
+    const proposal = await forfeit(ALEX, BLAKE);
+    await expire(proposal);
+    await expect(as(BLAKE, `select * from public.respond_to_challenge($1, true)`, [proposal])).rejects.toThrow(/deadline .* passed/);
+
+    // A forfeit that was held must not be reopened into a penalty after the deadline.
+    const held = await forfeit(ALEX, ALEX, { target: 1 });
+    await as(ALEX, `select * from public.increment_challenge($1)`, [held]);
+    await expire(held);
+    await expect(as(ALEX, `select * from public.set_challenge_progress($1, 0)`, [held])).rejects.toThrow(/deadline .* has passed/);
+    expect((await row(held)).status).toBe("completed");
+  });
+
+  it("an unanswered proposal past its deadline just lapses, quietly", async () => {
+    const id = await forfeit(ALEX, BLAKE);
+    await expire(id);
+    await settle(BLAKE);
+    expect((await row(id)).status).toBe("expired");
+    expect(await as(BLAKE, `select 1 from public.notifications where reference_id = $1`, [id])).toHaveLength(0);
+  });
+
+  it("a reward challenge that ran out of time just ends: no penalty, and the person is told", async () => {
+    const a0 = await bal(ALEX);
+    const [ch] = await as(ALEX, `select * from public.create_challenge('Read a book', $1, 3, 40, 'reward', false, current_date + 4, 0)`, [ALEX]);
+    await expire(ch.id);
+    await settle(ALEX);
+    expect((await row(ch.id)).status).toBe("expired");
+    expect(await bal(ALEX)).toBe(a0);
+    expect(await notes(ALEX, ch.id)).toEqual([{ type: "challenge_expired", message: "Deadline passed: Read a book. It was not finished in time." }]);
+    expect(await ledger(ch.id)).toEqual([]);
+  });
+
+  it("a joint challenge that ran out of time tells both partners", async () => {
+    const [ch] = await as(ALEX, `select * from public.create_challenge('Tidy together', $1, 3, 40, 'reward', true, current_date + 4, 0)`, [ALEX]);
+    await expire(ch.id);
+    await settle(BLAKE);
+    expect((await row(ch.id)).status).toBe("expired");
+    expect(await notes(ALEX, ch.id)).toHaveLength(1);
+    expect(await notes(BLAKE, ch.id)).toHaveLength(1);
+  });
+
+  it("the app's settle call only touches the caller's own household", async () => {
+    await as(DREW, `select * from public.create_household('Drew') `).catch(() => undefined);
+    const mine = await forfeit(ALEX, ALEX, { title: "Mine" });
+    const theirs = (await as(DREW, `select * from public.create_challenge('Theirs', $1, 3, 0, 'forfeit', false, current_date + 3, 5)`, [DREW]))[0].id as string;
+    await expire(mine); await expire(theirs);
+    await settle(ALEX);
+    expect((await row(mine)).status).toBe("expired_penalized");
+    expect((await row(theirs)).status).toBe("active"); // Drew's household is settled on Drew's own call
+    await settle(DREW);
+    expect((await row(theirs)).status).toBe("expired_penalized");
+  });
+
+  it("midnight is the household's own midnight, not the server's", async () => {
+    const hh = (await admin(`select household_id from public.profiles where id = $1`, [ALEX]))[0].household_id;
+    try {
+      for (const tz of ["Pacific/Kiritimati", "Etc/GMT+12"]) { // 26 hours apart: their dates always differ
+        await admin(`update public.households set timezone = $2 where id = $1`, [hh, tz]);
+        await setBal(ALEX, 50);
+        const ended = await forfeit(ALEX, ALEX, { title: `Ended in ${tz}`, penalty: 5 });
+        const open = await forfeit(ALEX, ALEX, { title: `Open in ${tz}`, penalty: 5 });
+        // creation accepted "today + 3" in this timezone; now move one to yesterday and one to today, on ITS clock
+        await admin(`update public.challenges set deadline_date = ($2::date - 1) where id = $1`, [ended, await today(tz)]);
+        await admin(`update public.challenges set deadline_date = $2::date where id = $1`, [open, await today(tz)]);
+        await settle(ALEX);
+        expect((await row(ended)).status).toBe("expired_penalized");
+        expect((await row(open)).status).toBe("active");
+      }
+    } finally {
+      await admin(`update public.households set timezone = 'Europe/London' where id = $1`, [hh]);
+    }
+  });
+
+  it("deleting a missed forfeit gives back exactly what was docked", async () => {
+    await setBal(ALEX, 50);
+    const id = await forfeit(ALEX, ALEX, { penalty: 10 });
+    await expire(id); await settle(ALEX);
+    expect(await bal(ALEX)).toBe(40);
+    expect((await as(BLAKE, `select public.delete_challenge($1) as taken`, [id]))[0].taken).toBe(-10); // negative = refunded
+    expect(await bal(ALEX)).toBe(50);
+    expect((await as(ALEX, `select message from public.notifications where reference_id = $1 and type = 'points_adjusted'`, [id]))[0].message)
+      .toBe('Blake deleted "Wash up before bed" and refunded the penalty: your balance went up by 10 pts');
+
+    await setBal(ALEX, 3); // the floor case: only 3 was really docked, so only 3 comes back
+    const short = await forfeit(ALEX, ALEX, { penalty: 10 });
+    await expire(short); await settle(ALEX);
+    await as(ALEX, `select public.delete_challenge($1)`, [short]);
+    expect(await bal(ALEX)).toBe(3);
+  });
+
+  it("an ended challenge cannot be edited or logged, but can be deleted", async () => {
+    const id = await forfeit(ALEX, ALEX);
+    await expire(id); await settle(ALEX);
+    await expect(as(ALEX, `select * from public.update_challenge($1, 'x', 3, 0, $2)`, [id, ALEX])).rejects.toThrow(/has ended/);
+    await expect(as(ALEX, `select * from public.increment_challenge($1)`, [id])).rejects.toThrow(/not active for you/);
+    await expect(as(ALEX, `select * from public.set_challenge_progress($1, 1)`, [id])).rejects.toThrow(/not running/);
+    await as(ALEX, `select public.delete_challenge($1)`, [id]);
+    expect(await admin(`select 1 from public.challenges where id = $1`, [id])).toHaveLength(0);
+  });
+
+  it("the penalty and deadline of a running forfeit can be edited, but not removed or set in the past", async () => {
+    const id = await forfeit(ALEX, ALEX, { penalty: 10 });
+    const later = await addDays(await today(), 10);
+    const [ch] = await as(ALEX, `select * from public.update_challenge($1, 'Wash up before bed', 3, 0, $2, $3::date, 25)`, [id, ALEX, later]);
+    expect(ch).toMatchObject({ penalty_points: 25, reward_points: 0, type: "forfeit" });
+    expect((await admin(`select deadline_date::text as d from public.challenges where id = $1`, [id]))[0].d).toBe(later);
+    await expect(as(ALEX, `select * from public.update_challenge($1, 'x', 3, 0, $2, null, 25)`, [id, ALEX])).rejects.toThrow(/needs a deadline/);
+    await expect(as(ALEX, `select * from public.update_challenge($1, 'x', 3, 0, $2, $3::date, 25)`, [id, ALEX, await addDays(await today(), -3)])).rejects.toThrow(/has not passed/);
+    await expect(as(ALEX, `select * from public.update_challenge($1, 'x', 3, 0, $2, $3::date, 0)`, [id, ALEX, later])).rejects.toThrow(/between 1 and 500/);
+  });
+
+  it("keeps an unbroken ledger chain through a penalty", async () => {
+    await setBal(BLAKE, 30);
+    const id = await forfeit(BLAKE, BLAKE, { penalty: 12 });
+    await expire(id); await settle(BLAKE);
+    const [r] = await ledger(id);
+    expect(r.balance_after).toBe(await bal(BLAKE));
+    expect(r.balance_after).toBe(30 - 12);
+  });
+
+  it("settlement helpers are internal; the app-facing call is closed to anonymous users", async () => {
+    await expect(as(ALEX, `select public.settle_challenges_core(null)`)).rejects.toThrow(/permission denied/);
+    await expect(as(ALEX, `select public.household_today(public.current_household_id())`)).rejects.toThrow(/permission denied/);
+    await expect(as(ALEX, `select public.pay_challenge(c, 1, 'x', $1) from public.challenges c limit 1`, [ALEX])).rejects.toThrow(/permission denied/);
+    await expect(asAnon(`select public.settle_my_challenges()`)).rejects.toThrow(/permission denied/);
+    await expect(asAnon(`select * from public.create_challenge('x', gen_random_uuid(), 1, 1)`)).rejects.toThrow(/permission denied/);
   });
 });

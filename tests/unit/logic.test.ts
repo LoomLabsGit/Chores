@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { badgeCount } from "@/lib/logic/notifications";
-import { progressPct } from "@/lib/logic/challenges";
+import {
+  contributionLine,
+  daysUntil,
+  describeDeadline,
+  hasEnded,
+  jointHalf,
+  payoutEach,
+  progressPct,
+} from "@/lib/logic/challenges";
 import {
   addDays,
   formatWeekTitle,
@@ -28,9 +36,12 @@ import {
   calculateBasePoints,
   calculatePoints,
   calculateSplit,
+  choreTotal,
+  clampBounty,
   clampTax,
   describeReward,
   estimatePoints,
+  libraryPoints,
   snapMinutes,
 } from "@/lib/logic/points";
 import { formatMinutes } from "@/lib/logic/split";
@@ -75,6 +86,8 @@ describe("dates", () => {
   });
 });
 
+const timeBased = { pricing_type: "time_based" as const, fixed_bounty_points: 15 };
+
 describe("time-based points", () => {
   it("earns 12 points an hour: 1 base point per 5 minutes, minimum 1", () => {
     expect(calculateBasePoints(5)).toBe(1);
@@ -91,8 +104,8 @@ describe("time-based points", () => {
   });
 
   it("estimates a scheduled chore's bounty from its estimate and tax", () => {
-    expect(estimatePoints({ estimated_duration: 15, chore_tax: 5 })).toBe(8);
-    expect(estimatePoints({ estimated_duration: 30, chore_tax: 0 })).toBe(6);
+    expect(estimatePoints({ ...timeBased, estimated_duration: 15, chore_tax: 5 })).toBe(8);
+    expect(estimatePoints({ ...timeBased, estimated_duration: 30, chore_tax: 0 })).toBe(6);
   });
 
   it("words the live reward preview as specified", () => {
@@ -174,6 +187,8 @@ const lib = (over: Partial<ChoreLibraryItem>): ChoreLibraryItem => ({
   default_duration: 15,
   default_points: 5,
   chore_tax: 0,
+  pricing_type: "time_based",
+  fixed_bounty_points: 15,
   is_archived: false,
   last_used_at: null,
   created_at: "2026-01-01T00:00:00Z",
@@ -237,6 +252,12 @@ const challenge = (over: Partial<Challenge>): Challenge => ({
   status: "pending",
   created_at: "2026-09-18T10:00:00Z",
   completed_at: null,
+  type: "reward",
+  is_joint: false,
+  deadline_date: null,
+  penalty_points: 0,
+  completed_by_a_count: 0,
+  completed_by_b_count: 0,
   ...over,
 });
 
@@ -515,6 +536,7 @@ describe("manage chores helpers", () => {
 });
 
 describe("dynamic ledger", () => {
+  const time = (tax: number) => ({ pricing_type: "time_based" as const, fixed_bounty_points: 15, chore_tax: tax });
   const A = "alex";
   const B = "blake";
 
@@ -526,7 +548,7 @@ describe("dynamic ledger", () => {
 
   it("re-prices from logged time and tax, splitting exactly (owner rounded, other gets the remainder)", () => {
     // 45 min = 9 + tax 4 = 13; 60% -> 8 / 5
-    const { total, shares } = repricedShares({ minutes: 45, tax: 4, ownerPercent: 60, ownerId: A, otherId: B });
+    const { total, shares } = repricedShares({ minutes: 45, pricing: time(4), ownerPercent: 60, ownerId: A, otherId: B });
     expect(total).toBe(13);
     expect(shares).toEqual({ [A]: 8, [B]: 5 });
     expect(shares[A] + shares[B]).toBe(total);
@@ -534,7 +556,7 @@ describe("dynamic ledger", () => {
 
   it("works out each person's difference, as the database does (30 -> 45 min at 60/40, tax 4)", () => {
     const before = completionShares({ user_a_id: A, user_a_points: 6, user_b_id: B, user_b_points: 4 });
-    const rows = ledgerRows(before, repricedShares({ minutes: 45, tax: 4, ownerPercent: 60, ownerId: A, otherId: B }).shares);
+    const rows = ledgerRows(before, repricedShares({ minutes: 45, pricing: time(4), ownerPercent: 60, ownerId: A, otherId: B }).shares);
     expect(rows).toEqual([
       { userId: A, before: 6, after: 8, delta: 2 },
       { userId: B, before: 4, after: 5, delta: 1 },
@@ -543,13 +565,13 @@ describe("dynamic ledger", () => {
 
   it("handing the chore over swaps who holds the first share", () => {
     const before = completionShares({ user_a_id: A, user_a_points: 6, user_b_id: B, user_b_points: 4 });
-    const rows = ledgerRows(before, repricedShares({ minutes: 30, tax: 4, ownerPercent: 60, ownerId: B, otherId: A }).shares);
+    const rows = ledgerRows(before, repricedShares({ minutes: 30, pricing: time(4), ownerPercent: 60, ownerId: B, otherId: A }).shares);
     expect(rows.map((r) => [r.userId, r.delta])).toEqual([[A, -2], [B, 2]]);
   });
 
   it("a lower tax is a debit, and a household of one mirrors the owner", () => {
     const before = completionShares({ user_a_id: A, user_a_points: 16, user_b_id: A, user_b_points: 0 });
-    const rows = ledgerRows(before, repricedShares({ minutes: 60, tax: 0, ownerPercent: 100, ownerId: A, otherId: A }).shares);
+    const rows = ledgerRows(before, repricedShares({ minutes: 60, pricing: time(0), ownerPercent: 100, ownerId: A, otherId: A }).shares);
     expect(rows).toEqual([{ userId: A, before: 16, after: 12, delta: -4 }]);
   });
 
@@ -594,5 +616,134 @@ describe("category picker logic", () => {
     expect(resolveCategory(cats, "  kitchen ")).toBe("Kitchen");
     expect(resolveCategory(cats, " Pets ")).toBe("Pets");
     expect(resolveCategory(cats, "   ")).toBe("");
+  });
+});
+
+describe("fixed-bounty chores", () => {
+  const mission = (bounty: number, tax = 0) => ({ pricing_type: "fixed_bounty" as const, fixed_bounty_points: bounty, chore_tax: tax });
+  const timed = (tax: number) => ({ pricing_type: "time_based" as const, fixed_bounty_points: 15, chore_tax: tax });
+
+  it("pays the bounty whatever the time, and ignores any chore tax", () => {
+    expect(choreTotal(5, mission(25))).toBe(25);
+    expect(choreTotal(180, mission(25))).toBe(25);
+    expect(choreTotal(45, mission(25, 9))).toBe(25);
+    expect(choreTotal(45, timed(4))).toBe(13); // a time-based chore is unchanged
+  });
+
+  it("estimates a mission by its bounty, not its estimate", () => {
+    expect(estimatePoints({ ...mission(40), estimated_duration: 15 })).toBe(40);
+    expect(estimatePoints({ ...mission(40), estimated_duration: 600 })).toBe(40);
+    expect(libraryPoints({ ...mission(30), default_duration: 90 })).toBe(30);
+    expect(libraryPoints({ ...timed(2), default_duration: 30 })).toBe(8);
+  });
+
+  it("splits the bounty and the minutes along the same ratio (the spec's worked example)", () => {
+    // Video Editing: 45 mins, fixed 20 pts, Partner A 70%
+    const split = calculateSplit(45, choreTotal(45, mission(20)), 70);
+    expect(split.a).toEqual({ pct: 70, minutes: 32, points: 14 });
+    expect(split.b).toEqual({ pct: 30, minutes: 13, points: 6 });
+  });
+
+  it("always splits a bounty exactly, for every share", () => {
+    for (const bounty of [1, 7, 15, 25, 99, 500]) {
+      for (const pct of [0, 10, 30, 50, 70, 90, 100]) {
+        const { a, b } = calculateSplit(35, bounty, pct);
+        expect(a.points + b.points).toBe(bounty);
+        expect(a.points).toBe(Math.round((bounty * pct) / 100));
+        expect(a.minutes + b.minutes).toBe(35);
+      }
+    }
+  });
+
+  it("keeps the bounty inside 1 to 500", () => {
+    expect([clampBounty(0), clampBounty(15.4), clampBounty(9999), clampBounty(Number.NaN)]).toEqual([1, 15, 500, 15]);
+  });
+
+  it("previews a re-priced mission in the ledger: only the bounty moves the total, time only moves minutes", () => {
+    const before = completionShares({ user_a_id: "a", user_a_points: 14, user_b_id: "b", user_b_points: 6 });
+    const longer = repricedShares({ minutes: 90, pricing: mission(20), ownerPercent: 70, ownerId: "a", otherId: "b" });
+    expect(ledgerRows(before, longer.shares).every((r) => r.delta === 0)).toBe(true);
+    const richer = repricedShares({ minutes: 45, pricing: mission(30), ownerPercent: 70, ownerId: "a", otherId: "b" });
+    expect(ledgerRows(before, richer.shares).map((r) => r.delta)).toEqual([7, 3]);
+  });
+
+  const usage = { open: 2, done: 5, repeating: 1 };
+  const base = { title: "Detail the car", minutes: 60, tax: 0, pricing: "fixed_bounty" as const, bounty: 20 };
+
+  it("explains a bounty change: it re-prices finished missions", () => {
+    expect(describePush(base, { ...base, bounty: 35 }, usage)).toEqual([
+      "The new bounty applies to 2 unfinished chores and 1 repeating chore (every later day).",
+      "5 finished chores will be re-priced (+15 pts each) and balances adjusted to match.",
+    ]);
+    expect(describePush(base, { ...base, bounty: 35 }, usage, false)[1]).toBe("Finished chores keep the points they earned.");
+  });
+
+  it("switching the pricing model never rewrites history", () => {
+    const toFixed = describePush({ ...base, pricing: "time_based", tax: 3 }, { ...base, bounty: 25 }, usage);
+    expect(toFixed[0]).toMatch(/^The new fixed bounty and bounty apply to /);
+    expect(toFixed[1]).toBe("Finished chores keep the points they earned.");
+    const toTime = describePush(base, { ...base, pricing: "time_based", tax: 5 }, usage);
+    expect(toTime[toTime.length - 1]).toBe("Finished chores keep the points they earned.");
+  });
+
+  it("does not mention time or tax for a fixed-bounty chore", () => {
+    expect(describePush(base, { ...base, minutes: 90, tax: 7 }, usage)).toEqual([]);
+  });
+});
+
+describe("forfeit and joint challenge helpers", () => {
+  it("halves a joint reward with round(reward / 2), so an odd reward rounds up for each", () => {
+    expect([jointHalf(20), jointHalf(15), jointHalf(1), jointHalf(500)]).toEqual([10, 8, 1, 250]);
+  });
+
+  it("pays an individual challenge in full and a joint one by half", () => {
+    expect(payoutEach({ reward_points: 20, is_joint: false })).toBe(20);
+    expect(payoutEach({ reward_points: 20, is_joint: true })).toBe(10);
+  });
+
+  it("counts days to a deadline on the calendar, across month ends and clock changes", () => {
+    expect(daysUntil("2026-09-20", "2026-09-19")).toBe(1);
+    expect(daysUntil("2026-09-19", "2026-09-19")).toBe(0);
+    expect(daysUntil("2026-09-10", "2026-09-19")).toBe(-9);
+    expect(daysUntil("2026-10-02", "2026-09-30")).toBe(2); // over a month end
+    expect(daysUntil("2026-10-26", "2026-10-24")).toBe(2); // over the UK clock change
+  });
+
+  it("describes a deadline for a card", () => {
+    expect(describeDeadline("2026-09-25", "2026-09-19")).toBe("6 days left");
+    expect(describeDeadline("2026-09-20", "2026-09-19")).toBe("Due tomorrow");
+    expect(describeDeadline("2026-09-19", "2026-09-19")).toBe("Due today");
+    expect(describeDeadline("2026-09-18", "2026-09-19")).toBe("Overdue");
+  });
+
+  it("shows each partner's contribution from the viewer's side", () => {
+    const c = { completed_by_a_count: 3, completed_by_b_count: 2 };
+    expect(contributionLine(c, true, "Blake")).toBe("You: 3 | Blake: 2");
+    expect(contributionLine(c, false, "Alex")).toBe("You: 2 | Alex: 3");
+  });
+
+  it("knows which challenges have ended", () => {
+    expect(hasEnded({ status: "expired" })).toBe(true);
+    expect(hasEnded({ status: "expired_penalized" })).toBe(true);
+    expect(["pending", "active", "completed", "rejected"].some((status) => hasEnded({ status: status as never }))).toBe(false);
+  });
+
+  it("counts a joint challenge for both partners in Stats, and a forfeit for nobody", () => {
+    const at = (iso: string) => `${iso}T12:00:00Z`;
+    const stats = computeStats({
+      completions: [],
+      instances: [],
+      library: [],
+      redemptions: [],
+      challenges: [
+        challenge({ id: "j", status: "completed", is_joint: true, reward_points: 15, assigned_to: "a", completed_at: at("2026-09-18") }),
+        challenge({ id: "s", status: "completed", reward_points: 20, assigned_to: "b", completed_at: at("2026-09-18") }),
+        challenge({ id: "f", status: "completed", type: "forfeit", reward_points: 0, assigned_to: "a", penalty_points: 10, completed_at: at("2026-09-18") }),
+      ],
+      memberIds: ["a", "b"],
+      start: "2026-09-01",
+    });
+    expect(stats.perUser.a.challengePoints).toBe(8); // half of 15, rounded up
+    expect(stats.perUser.b.challengePoints).toBe(8 + 20);
   });
 });

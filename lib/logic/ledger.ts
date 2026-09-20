@@ -1,5 +1,5 @@
 import type { ChoreCompletion } from "@/lib/types";
-import { calculatePoints, calculateSplit } from "./points";
+import { calculateSplit, choreTotal, type Pricing } from "./points";
 
 // The dynamic ledger. Changing a finished chore re-prices it: the total is recalculated from the logged
 // time and the tax, split again, and each person's balance moves by the DIFFERENCE between their new
@@ -14,9 +14,10 @@ export function completionShares(c: Pick<ChoreCompletion, "user_a_id" | "user_a_
 }
 
 export type Repricing = {
-  /** Minutes actually logged. */
+  /** Minutes actually logged. For a fixed bounty they only feed Stats, never the points. */
   minutes: number;
-  tax: number;
+  /** How the chore is priced. A time-based chore uses minutes and tax; a fixed-bounty one its bounty. */
+  pricing: Pricing;
   /** The owner's share of the effort, 0-100 in steps of 10. */
   ownerPercent: number;
   /** Whose chore it is: they hold the first share. */
@@ -27,7 +28,7 @@ export type Repricing = {
 
 /** The shares a finished chore would have with these values. */
 export function repricedShares(r: Repricing) {
-  const total = calculatePoints(r.minutes, r.tax);
+  const total = choreTotal(r.minutes, r.pricing);
   const split = calculateSplit(r.minutes, total, r.ownerPercent);
   const shares: Record<string, number> = {};
   shares[r.ownerId] = (shares[r.ownerId] ?? 0) + split.a.points;

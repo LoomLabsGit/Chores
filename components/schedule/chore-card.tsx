@@ -118,7 +118,11 @@ export function ChoreCardView({
           )}
           <span
             className="flex items-center gap-0.5 rounded-full bg-gold-soft px-1.5 py-0.5 text-gold"
-            aria-label={`Worth about ${estimatePoints(instance)} points`}
+            aria-label={
+              instance.pricing_type === "fixed_bounty"
+                ? `Fixed bounty of ${estimatePoints(instance)} points`
+                : `Worth about ${estimatePoints(instance)} points`
+            }
           >
             <Icon name="bolt" size={11} />
             {estimatePoints(instance)} pts

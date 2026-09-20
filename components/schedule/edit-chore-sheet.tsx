@@ -10,12 +10,12 @@ import {
   type RepeatChoice,
 } from "@/lib/logic/recurrence";
 import { useHousehold } from "@/lib/store/household-store";
-import type { ChoreInstance } from "@/lib/types";
+import type { ChoreInstance, PricingType } from "@/lib/types";
 import { useToast } from "../toast";
 import { fieldClass, primaryButton, Segmented } from "../ui/controls";
 import { Modal } from "../ui/modal";
 import { Avatar } from "../ui/controls";
-import { AssigneeField, DurationField, RewardPreview, SplitControl, TaxField } from "../ui/points-controls";
+import { AssigneeField, BountyField, DurationField, PricingFields, SplitControl, TaxField } from "../ui/points-controls";
 
 export function EditChoreSheet({ instance, onClose }: { instance: ChoreInstance | null; onClose: () => void }) {
   if (!instance) return null;
@@ -42,6 +42,9 @@ function EditForm({ instance, onClose }: { instance: ChoreInstance; onClose: () 
   const [title, setTitle] = useState(instance.title);
   const [minutes, setMinutes] = useState(instance.estimated_duration);
   const [tax, setTax] = useState(instance.chore_tax);
+  // A finished chore keeps the pricing model it was paid under; an unfinished one can switch.
+  const [pricing, setPricing] = useState<PricingType>(instance.pricing_type);
+  const [bounty, setBounty] = useState(instance.fixed_bounty_points);
   const [date, setDate] = useState(instance.scheduled_date);
   const [assignee, setAssignee] = useState<string | null>(finished ? (instance.assigned_to ?? me.id) : instance.assigned_to);
   const [logged, setLogged] = useState(completion ? completion.total_duration_minutes : instance.estimated_duration);
@@ -64,7 +67,7 @@ function EditForm({ instance, onClose }: { instance: ChoreInstance; onClose: () 
       ? (() => {
           const after = repricedShares({
             minutes: logged,
-            tax,
+            pricing: { pricing_type: instance.pricing_type, fixed_bounty_points: bounty, chore_tax: tax },
             ownerPercent: split && otherId !== ownerId ? ownerPct : 100,
             ownerId,
             otherId,
@@ -91,6 +94,8 @@ function EditForm({ instance, onClose }: { instance: ChoreInstance; onClose: () 
       title,
       minutes,
       tax,
+      pricing: finished ? instance.pricing_type : pricing,
+      bounty,
       assignedTo: assignee,
       date,
       repeat: effectiveRepeat,
@@ -120,7 +125,7 @@ function EditForm({ instance, onClose }: { instance: ChoreInstance; onClose: () 
       {finished && (
         <p className="rounded-2xl bg-ok-soft px-4 py-3 text-sm font-semibold text-ok">
           {repriceable
-            ? "This chore is finished. Change the time, tax, split or who it is for and its points are recalculated. Each balance moves by the difference straight away."
+            ? "This chore is finished. Change the time, tax or bounty, the split or who it is for and its points are recalculated. Each balance moves by the difference straight away."
             : "This chore is finished. Its points can't be recalculated because it has no completion record."}
         </p>
       )}
@@ -156,22 +161,19 @@ function EditForm({ instance, onClose }: { instance: ChoreInstance; onClose: () 
       </label>
 
       {!finished && (
-        <>
-          <div className="flex flex-col gap-1.5">
-            <label htmlFor="edit-minutes" className="text-sm font-extrabold">
-              Estimated time
-            </label>
-            <DurationField
-              inputId="edit-minutes"
-              value={minutes}
-              onChange={setMinutes}
-              steps={ESTIMATE_STEPS}
-              label="Estimated minutes"
-            />
-          </div>
-          <TaxField value={tax} onChange={setTax} />
-          <RewardPreview minutes={minutes} tax={tax} />
-        </>
+        <PricingFields
+          pricing={pricing}
+          onPricing={setPricing}
+          bounty={bounty}
+          onBounty={setBounty}
+          minutes={minutes}
+          onMinutes={setMinutes}
+          tax={tax}
+          onTax={setTax}
+          steps={ESTIMATE_STEPS}
+          timeLabel="Estimated time"
+          timeId="edit-minutes"
+        />
       )}
 
       {repriceable && (
@@ -182,7 +184,11 @@ function EditForm({ instance, onClose }: { instance: ChoreInstance; onClose: () 
             </label>
             <DurationField inputId="edit-logged" value={logged} onChange={setLogged} steps={COMPLETION_STEPS} label="Minutes logged" />
           </div>
-          <TaxField value={tax} onChange={setTax} />
+          {instance.pricing_type === "fixed_bounty" ? (
+            <BountyField value={bounty} onChange={setBounty} note="Changing it re-prices this chore, and balances adjust by the difference." />
+          ) : (
+            <TaxField value={tax} onChange={setTax} />
+          )}
           {otherProfile && ownerProfile && (
             <SplitControl
               owner={ownerProfile}

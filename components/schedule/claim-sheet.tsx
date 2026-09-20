@@ -2,14 +2,14 @@
 
 import { useState } from "react";
 import { formatLongDay } from "@/lib/logic/dates";
-import { calculatePoints, ESTIMATE_STEPS } from "@/lib/logic/points";
+import { choreTotal, ESTIMATE_STEPS } from "@/lib/logic/points";
 import { useHousehold } from "@/lib/store/household-store";
 import type { ChoreInstance } from "@/lib/types";
 import { Icon } from "../icons";
 import { useToast } from "../toast";
 import { primaryButton, secondaryButton } from "../ui/controls";
 import { Modal } from "../ui/modal";
-import { DurationField, RewardPreview, TaxField } from "../ui/points-controls";
+import { BountyField, BountyPreview, DurationField, RewardPreview, TaxField } from "../ui/points-controls";
 
 /**
  * Opens when you tap an unassigned card. Adjust the time estimate and tax if you like, then either
@@ -46,30 +46,29 @@ function ClaimForm({
   const { toast } = useToast();
   const [minutes, setMinutes] = useState(instance.estimated_duration);
   const [tax, setTax] = useState(instance.chore_tax);
+  const [bounty, setBounty] = useState(instance.fixed_bounty_points);
   const [busy, setBusy] = useState(false);
-  const changed = minutes !== instance.estimated_duration || tax !== instance.chore_tax;
+  const mission = instance.pricing_type === "fixed_bounty";
+  const changed = minutes !== instance.estimated_duration || tax !== instance.chore_tax || bounty !== instance.fixed_bounty_points;
+  const adjusted = { estimated_duration: minutes, chore_tax: tax, fixed_bounty_points: bounty };
 
   async function claim() {
     setBusy(true);
-    const ok = await actions.moveInstance(instance.id, {
-      assigned_to: me.id,
-      estimated_duration: minutes,
-      chore_tax: tax,
-    });
+    const ok = await actions.moveInstance(instance.id, { assigned_to: me.id, ...adjusted });
     setBusy(false);
     if (!ok) return;
     onClose();
-    toast(`Claimed ${instance.title}. It's worth about ${calculatePoints(minutes, tax)} pts`, "success");
+    toast(`Claimed ${instance.title}. It's worth ${mission ? "" : "about "}${choreTotal(minutes, { ...instance, ...adjusted })} pts`, "success");
   }
 
   async function completeNow() {
     setBusy(true);
     // Save the adjusted estimate first; completing then claims the chore for you.
-    const ok = changed ? await actions.moveInstance(instance.id, { estimated_duration: minutes, chore_tax: tax }) : true;
+    const ok = changed ? await actions.moveInstance(instance.id, adjusted) : true;
     setBusy(false);
     if (!ok) return;
     onClose();
-    onCompleteNow({ ...instance, estimated_duration: minutes, chore_tax: tax });
+    onCompleteNow({ ...instance, ...adjusted });
   }
 
   return (
@@ -81,14 +80,23 @@ function ClaimForm({
         </p>
       </div>
 
-      <div className="flex flex-col gap-1.5">
-        <label htmlFor="claim-minutes" className="text-sm font-extrabold">
-          Estimated time
-        </label>
-        <DurationField inputId="claim-minutes" value={minutes} onChange={setMinutes} steps={ESTIMATE_STEPS} label="Estimated minutes" />
-      </div>
-      <TaxField value={tax} onChange={setTax} />
-      <RewardPreview minutes={minutes} tax={tax} />
+      {mission ? (
+        <>
+          <BountyField value={bounty} onChange={setBounty} />
+          <BountyPreview bounty={bounty} />
+        </>
+      ) : (
+        <>
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="claim-minutes" className="text-sm font-extrabold">
+              Estimated time
+            </label>
+            <DurationField inputId="claim-minutes" value={minutes} onChange={setMinutes} steps={ESTIMATE_STEPS} label="Estimated minutes" />
+          </div>
+          <TaxField value={tax} onChange={setTax} />
+          <RewardPreview minutes={minutes} tax={tax} />
+        </>
+      )}
 
       <div className="flex flex-col gap-2">
         <button onClick={claim} disabled={busy} className={`${primaryButton} min-h-14 w-full text-lg`}>

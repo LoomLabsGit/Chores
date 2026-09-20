@@ -14,7 +14,8 @@ import type { RealtimePostgresChangesPayload } from "@supabase/supabase-js";
 import { useToast } from "@/components/toast";
 import { friendlyError } from "@/lib/errors";
 import { getSupabase } from "@/lib/supabase/client";
-import { calculatePoints, calculateSplit } from "@/lib/logic/points";
+import { jointHalf } from "@/lib/logic/challenges";
+import { calculateSplit, choreTotal } from "@/lib/logic/points";
 import { addDays, parseISODate } from "@/lib/logic/dates";
 import type { LibraryUsage } from "@/lib/logic/library";
 import type { RepeatChoice } from "@/lib/logic/recurrence";
@@ -22,10 +23,12 @@ import { uuid } from "@/lib/uuid";
 import type {
   AppNotification,
   Challenge,
+  ChallengeType,
   ChoreCompletion,
   ChoreInstance,
   ChoreLibraryItem,
   Household,
+  PricingType,
   Profile,
   Reward,
   RewardRedemption,
@@ -157,10 +160,20 @@ export type NewChore = {
   tax: number;
   /** Optional; left empty it is filed under General. */
   category?: string;
+  /** Defaults to time-based. A fixed bounty pays `bounty` points whatever the time. */
+  pricing?: PricingType;
+  bounty?: number;
 };
 
 /** A library chore as edited on the Manage screen. */
-export type LibraryInput = { title: string; category: string; minutes: number; tax: number };
+export type LibraryInput = {
+  title: string;
+  category: string;
+  minutes: number;
+  tax: number;
+  pricing: PricingType;
+  bounty: number;
+};
 
 /** How many existing chores an edit reached. */
 export type LibraryPushResult = {
@@ -175,18 +188,30 @@ export type LibraryPushResult = {
 
 /** Fields that can be changed on an unfinished chore without a special server function. */
 export type InstancePatch = Partial<
-  Pick<ChoreInstance, "scheduled_date" | "assigned_to" | "estimated_duration" | "chore_tax">
+  Pick<
+    ChoreInstance,
+    "scheduled_date" | "assigned_to" | "estimated_duration" | "chore_tax" | "pricing_type" | "fixed_bounty_points"
+  >
 >;
 
 /** Optional overrides when scheduling a library chore (defaults come from the library entry). */
-export type ScheduleOptions = { repeat?: RepeatChoice; minutes?: number; tax?: number };
+export type ScheduleOptions = {
+  repeat?: RepeatChoice;
+  minutes?: number;
+  tax?: number;
+  pricing?: PricingType;
+  bounty?: number;
+};
 
 export type ChoreEdit = {
   title: string;
   /** Estimated minutes (a multiple of 5). Points follow from this plus the tax. */
   minutes: number;
-  /** Flat chore tax, 0-50. */
+  /** Flat chore tax, 0-50. Only counts for a time-based chore. */
   tax: number;
+  /** How it is priced, and the bounty when it is a fixed-bounty chore. */
+  pricing: PricingType;
+  bounty: number;
   /** null = unassigned (the open pool). */
   assignedTo: string | null;
   date: string;
@@ -201,7 +226,23 @@ export type ChoreEdit = {
   ownerPercent?: number;
 };
 
-export type ChallengeInput = { title: string; target: number; reward: number; assignedTo: string };
+/** What can be edited on a challenge. Its kind (reward / forfeit) and scope (individual / joint) are fixed for life. */
+export type ChallengeInput = {
+  title: string;
+  target: number;
+  reward: number;
+  assignedTo: string;
+  /** YYYY-MM-DD, or null for none. A forfeit always needs one. */
+  deadline: string | null;
+  /** Points docked if a forfeit's deadline is missed. */
+  penalty: number;
+};
+
+export type NewChallengeInput = ChallengeInput & {
+  type: ChallengeType;
+  /** Shared by both partners: it starts at once and either can log progress. */
+  joint: boolean;
+};
 
 export type StatsData = { completions: ChoreCompletion[]; instances: ChoreInstance[] };
 
@@ -235,7 +276,7 @@ export type Actions = {
   uncompleteChore: (instance: ChoreInstance) => Promise<boolean>;
   /** `ownerPercent` is the share of the chore's owner (its assignee, or you if it is unassigned). */
   completeChore: (instance: ChoreInstance, minutes: number, ownerPercent: number) => Promise<boolean>;
-  createChallenge: (input: { title: string; assignedTo: string; target: number; reward: number }) => Promise<boolean>;
+  createChallenge: (input: NewChallengeInput) => Promise<boolean>;
   respondToChallenge: (id: string, accept: boolean) => Promise<boolean>;
   /**
    * Set a challenge's progress: the - and + on its card. Lowering a completed challenge reopens it and takes
@@ -244,7 +285,12 @@ export type Actions = {
   setChallengeProgress: (id: string, count: number) => Promise<Challenge | null>;
   /** Edit a challenge (name, target, reward, who it is for). Payouts follow for a completed one. */
   updateChallenge: (id: string, input: ChallengeInput) => Promise<Challenge | null>;
-  /** Delete a challenge. Resolves to the points taken back (0 unless it was completed), or null. */
+  /** What each missed forfeit really docked (points, positive), keyed by challenge id. */
+  fetchChallengePenalties: (ids: string[]) => Promise<Record<string, number>>;
+  /**
+   * Delete a challenge. Resolves to the points taken back (positive: a finished challenge's reward), refunded
+   * (negative: a missed forfeit's penalty), 0 otherwise, or null on failure.
+   */
   deleteChallenge: (id: string) => Promise<number | null>;
   /** Resolves to "completed" when this tap finished the challenge. */
   incrementChallenge: (id: string) => Promise<"ok" | "completed" | "failed">;
@@ -385,6 +431,25 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
     void loadCore();
   }, [loadCore]);
 
+  // Settle any challenge deadline that has passed (a missed forfeit docks its penalty). The server also does this
+  // hourly where it can, but this way it never depends on that: it happens whenever either partner opens the
+  // app, and again whenever the app comes back to the foreground (a phone can stay open past midnight).
+  const settle = useCallback(async () => {
+    const { data, error } = await supabase.rpc("settle_my_challenges");
+    if (error || typeof data !== "number" || data <= 0) return;
+    await loadCore();
+    toast("A challenge deadline has passed. See your notifications", "info");
+  }, [supabase, loadCore, toast]);
+  useEffect(() => {
+    if (state.status !== "ready") return;
+    void settle();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void settle();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [state.status, settle]);
+
   // Realtime: keep both devices in sync without pull-to-refresh.
   const householdId = state.household?.id;
   useEffect(() => {
@@ -518,7 +583,9 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
       async scheduleChore(chore, date, assignedTo, opts = {}) {
         const repeat = opts.repeat ?? "none";
         const minutes = opts.minutes ?? chore.default_duration;
-        const tax = opts.tax ?? chore.chore_tax;
+        const pricing = opts.pricing ?? chore.pricing_type;
+        const bounty = opts.bounty ?? chore.fixed_bounty_points;
+        const tax = pricing === "fixed_bounty" ? 0 : (opts.tax ?? chore.chore_tax); // a mission has no chore tax
         const id = uuid();
         const row: ChoreInstance = {
           id,
@@ -535,6 +602,8 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           points_assigned: 5, // legacy column, unused
           estimated_duration: minutes,
           chore_tax: tax,
+          pricing_type: pricing,
+          fixed_bounty_points: bounty,
         };
         pendingInsertsRef.current.add(id);
         dispatch({ type: "instance", row });
@@ -548,6 +617,8 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           scheduled_date: date,
           estimated_duration: minutes,
           chore_tax: tax,
+          pricing_type: pricing,
+          fixed_bounty_points: bounty,
         });
         pendingInsertsRef.current.delete(id);
         if (error) {
@@ -573,7 +644,13 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
       async createAndScheduleChore(input, date, assignedTo, repeat = "none") {
         const title = input.title.trim();
         if (!title) return false;
-        const opts: ScheduleOptions = { repeat, minutes: input.minutes, tax: input.tax };
+        const opts: ScheduleOptions = {
+          repeat,
+          minutes: input.minutes,
+          tax: input.tax,
+          pricing: input.pricing,
+          bounty: input.bounty,
+        };
         // Re-use an existing library chore with the same name instead of duplicating it.
         const existing = stateRef.current.library.find(
           (c) => !c.is_archived && c.title.toLowerCase() === title.toLowerCase(),
@@ -588,7 +665,9 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           category: input.category?.trim() || "General",
           default_duration: input.minutes,
           default_points: 5, // legacy column, unused
-          chore_tax: input.tax,
+          chore_tax: input.pricing === "fixed_bounty" ? 0 : input.tax,
+          pricing_type: input.pricing ?? "time_based",
+          fixed_bounty_points: input.bounty ?? 15,
           is_archived: false,
           last_used_at: new Date().toISOString(),
           created_at: new Date().toISOString(),
@@ -600,7 +679,9 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           title,
           category: input.category?.trim() || "General",
           default_duration: input.minutes,
-          chore_tax: input.tax,
+          chore_tax: lib.chore_tax,
+          pricing_type: lib.pricing_type,
+          fixed_bounty_points: lib.fixed_bounty_points,
         });
         if (error) {
           dispatch({ type: "remove", key: "library", id: libId });
@@ -615,6 +696,8 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           p_category: input.category,
           p_duration: input.minutes,
           p_tax: input.tax,
+          p_pricing_type: input.pricing,
+          p_bounty: input.bounty,
         });
         if (error) return fail(error);
         dispatch({ type: "upsert", key: "library", row: data as ChoreLibraryItem });
@@ -631,6 +714,8 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           p_duration: input.minutes,
           p_tax: input.tax,
           p_reprice_finished: opts?.repriceFinished ?? true,
+          p_pricing_type: input.pricing,
+          p_bounty: input.bounty,
         });
         if (error) {
           fail(error);
@@ -644,7 +729,9 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
             title: input.title.trim(),
             category: input.category.trim() || "General",
             default_duration: input.minutes,
-            chore_tax: input.tax,
+            chore_tax: input.pricing === "fixed_bounty" ? prev.chore_tax : input.tax,
+            pricing_type: input.pricing,
+            fixed_bounty_points: input.bounty,
           },
         });
         const row = (
@@ -799,6 +886,7 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
             p_total_minutes: edit.loggedMinutes ?? null,
             p_tax: edit.tax,
             p_owner_percent: edit.ownerPercent ?? null,
+            p_bounty: edit.bounty,
           });
           if (error) {
             dispatch({ type: "instance", row: prev });
@@ -814,7 +902,9 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
         const patch = {
           title,
           estimated_duration: edit.minutes,
-          chore_tax: edit.tax,
+          chore_tax: edit.pricing === "fixed_bounty" ? 0 : edit.tax,
+          pricing_type: edit.pricing,
+          fixed_bounty_points: edit.bounty,
           assigned_to: edit.assignedTo,
           scheduled_date: edit.date,
         };
@@ -831,9 +921,11 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
             p_instance_id: prev.id,
             p_title: title,
             p_duration: edit.minutes,
-            p_tax: edit.tax,
+            p_tax: edit.pricing === "fixed_bounty" ? 0 : edit.tax,
             p_assigned_to: edit.assignedTo,
             p_frequency: edit.repeat,
+            p_pricing_type: edit.pricing,
+            p_bounty: edit.bounty,
           }));
         } else if (!inSeries && edit.repeat !== "none") {
           ({ error: rpcError } = await supabase.rpc("make_chore_recurring", {
@@ -857,7 +949,7 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
         // An unassigned chore is claimed by the person completing it.
         const ownerId = instance.assigned_to ?? userId;
         const otherId = s.members.find((m) => m.id !== ownerId)?.id;
-        const totalPoints = calculatePoints(minutes, instance.chore_tax);
+        const totalPoints = choreTotal(minutes, instance);
         const split = calculateSplit(minutes, totalPoints, ownerPercent);
         const now = new Date().toISOString();
 
@@ -897,12 +989,16 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
         return true;
       },
 
-      async createChallenge({ title, assignedTo, target, reward }) {
+      async createChallenge({ title, assignedTo, target, reward, type, joint, deadline, penalty }) {
         const { data, error } = await supabase.rpc("create_challenge", {
           p_title: title,
           p_assigned_to: assignedTo,
           p_target_count: target,
           p_reward_points: reward,
+          p_type: type,
+          p_is_joint: joint,
+          p_deadline_date: deadline,
+          p_penalty_points: penalty,
         });
         if (error) return fail(error);
         dispatch({ type: "upsert", key: "challenges", row: data as Challenge });
@@ -929,16 +1025,27 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
         const prev = stateRef.current.challenges.find((c) => c.id === id);
         if (!prev || prev.status !== "active") return "failed";
         const finishes = prev.current_count + 1 >= prev.target_count;
+        // "a" is the household creator (the admin); a joint challenge tracks each partner's own taps.
+        const iAmA = stateRef.current.members.find((m) => m.id === userId)?.is_admin ?? false;
         dispatch({
           type: "upsert",
           key: "challenges",
           row: {
             ...prev,
             current_count: Math.min(prev.target_count, prev.current_count + 1),
+            completed_by_a_count: prev.completed_by_a_count + (prev.is_joint && iAmA ? 1 : 0),
+            completed_by_b_count: prev.completed_by_b_count + (prev.is_joint && !iAmA ? 1 : 0),
             status: finishes ? "completed" : "active",
           },
         });
-        if (finishes) dispatch({ type: "points", userId, delta: prev.reward_points });
+        if (finishes && prev.reward_points > 0) {
+          // A joint reward is split 50/50 (each gets round(reward / 2)); otherwise it goes to the person it is for.
+          if (prev.is_joint) {
+            for (const m of stateRef.current.members) dispatch({ type: "points", userId: m.id, delta: jointHalf(prev.reward_points) });
+          } else {
+            dispatch({ type: "points", userId: prev.assigned_to, delta: prev.reward_points });
+          }
+        }
 
         const { data, error } = await supabase.rpc("increment_challenge", { p_challenge_id: id });
         if (error) {
@@ -977,6 +1084,8 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           p_target_count: input.target,
           p_reward_points: input.reward,
           p_assigned_to: input.assignedTo,
+          p_deadline_date: input.deadline,
+          p_penalty_points: input.penalty,
         });
         if (error) {
           fail(error);
@@ -986,6 +1095,16 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
         dispatch({ type: "upsert", key: "challenges", row });
         await refreshMembers(); // a completed challenge's payout may have moved
         return row;
+      },
+
+      async fetchChallengePenalties(ids) {
+        if (!ids.length) return {};
+        const { data } = await supabase.from("point_ledger").select("reference_id, delta, reason").in("reference_id", ids);
+        const docked: Record<string, number> = {};
+        for (const r of (data ?? []) as { reference_id: string; delta: number; reason: string }[]) {
+          if (r.reason.startsWith("Missed deadline for challenge:")) docked[r.reference_id] = (docked[r.reference_id] ?? 0) - r.delta;
+        }
+        return docked;
       },
 
       async deleteChallenge(id) {

@@ -1,9 +1,21 @@
 "use client";
 
-import { calculateBasePoints, calculatePoints, clampTax, MAX_MINUTES, MAX_TAX, MIN_MINUTES, snapMinutes, TAX_CHIPS } from "@/lib/logic/points";
-import type { Profile } from "@/lib/types";
+import {
+  BOUNTY_STEP,
+  calculateBasePoints,
+  calculatePoints,
+  clampTax,
+  MAX_BOUNTY,
+  MAX_MINUTES,
+  MAX_TAX,
+  MIN_BOUNTY,
+  MIN_MINUTES,
+  snapMinutes,
+  TAX_CHIPS,
+} from "@/lib/logic/points";
+import type { PricingType, Profile } from "@/lib/types";
 import { Icon } from "../icons";
-import { Avatar, fieldClass, Segmented, type Tone } from "./controls";
+import { Avatar, fieldClass, Segmented, Stepper, type Tone } from "./controls";
 
 /**
  * Duration in whole 5-minute steps (minimum 5). The number is directly editable and snaps to the
@@ -277,5 +289,110 @@ export function SplitControl({
         </div>
       )}
     </section>
+  );
+}
+
+/** The single input of a fixed-bounty chore: "Bounty Points". */
+export function BountyField({
+  value,
+  onChange,
+  note = "Paid in full however long it takes. The time you log at the end is only saved for your stats.",
+}: {
+  value: number;
+  onChange: (n: number) => void;
+  note?: string;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <div>
+        <p className="text-sm font-extrabold">Bounty Points</p>
+        <p className="text-xs font-semibold text-muted">{note}</p>
+      </div>
+      <Stepper label="bounty points" value={value} min={MIN_BOUNTY} max={MAX_BOUNTY} step={BOUNTY_STEP} unit="pts" onChange={onChange} />
+    </div>
+  );
+}
+
+/** "Fixed reward: 25 pts, whatever the time" badge, the mission counterpart of RewardPreview. */
+export function BountyPreview({ bounty }: { bounty: number }) {
+  return (
+    <div
+      className="flex items-center gap-2.5 rounded-2xl bg-gold-soft px-4 py-3 text-gold"
+      role="status"
+      aria-label={`Fixed bounty ${bounty} points`}
+    >
+      <Icon name="bolt" size={18} />
+      <p className="text-sm font-extrabold leading-snug" aria-live="polite">
+        Fixed Bounty: <span className="whitespace-nowrap text-base">{bounty} pts</span>, whatever the time
+      </p>
+    </div>
+  );
+}
+
+/**
+ * How a chore is priced: [ Time-Based ] [ Fixed Bounty ].
+ * Time-Based shows the time, the chore tax and the live reward. Fixed Bounty hides all of that and asks for one
+ * number, the bounty points: outcome-based work (video editing, deep de-cluttering) where the time varies.
+ */
+export function PricingFields({
+  pricing,
+  onPricing,
+  bounty,
+  onBounty,
+  minutes,
+  onMinutes,
+  tax,
+  onTax,
+  steps,
+  timeLabel = "How long will it take?",
+  timeId,
+  timeAriaLabel = "Estimated minutes",
+}: {
+  pricing: PricingType;
+  onPricing: (p: PricingType) => void;
+  bounty: number;
+  onBounty: (n: number) => void;
+  minutes: number;
+  onMinutes: (n: number) => void;
+  tax: number;
+  onTax: (n: number) => void;
+  steps: readonly number[];
+  timeLabel?: string;
+  timeId: string;
+  timeAriaLabel?: string;
+}) {
+  return (
+    <div className="flex flex-col gap-5">
+      <div className="flex flex-col gap-1.5">
+        <span className="text-sm font-extrabold">Priced by</span>
+        <Segmented
+          label="Pricing model"
+          value={pricing}
+          onChange={onPricing}
+          options={[
+            { value: "time_based", label: <>Time-Based</> },
+            { value: "fixed_bounty", label: <>Fixed Bounty</> },
+          ]}
+        />
+      </div>
+
+      {pricing === "time_based" ? (
+        <>
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor={timeId} className="text-sm font-extrabold">
+              {timeLabel}
+            </label>
+            <DurationField inputId={timeId} value={minutes} onChange={onMinutes} steps={steps} label={timeAriaLabel} />
+          </div>
+          <TaxField value={tax} onChange={onTax} />
+          <RewardPreview minutes={minutes} tax={tax} />
+        </>
+      ) : (
+        <div className="flex flex-col gap-3">
+          <BountyField value={bounty} onChange={onBounty} />
+          <BountyPreview bounty={bounty} />
+        </div>
+      )}
+    </div>
   );
 }

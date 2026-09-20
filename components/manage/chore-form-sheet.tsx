@@ -11,15 +11,15 @@ import {
   type LibraryUsage,
 } from "@/lib/logic/library";
 import { formatDelta } from "@/lib/logic/ledger";
-import { ESTIMATE_STEPS, snapMinutes } from "@/lib/logic/points";
+import { DEFAULT_BOUNTY, ESTIMATE_STEPS, snapMinutes } from "@/lib/logic/points";
 import { useHousehold } from "@/lib/store/household-store";
-import type { ChoreLibraryItem } from "@/lib/types";
+import type { ChoreLibraryItem, PricingType } from "@/lib/types";
 import { Icon } from "../icons";
 import { useToast } from "../toast";
 import { fieldClass, primaryButton } from "../ui/controls";
 import { CategoryCombobox } from "../ui/category-combobox";
 import { Modal } from "../ui/modal";
-import { DurationField, RewardPreview, TaxField } from "../ui/points-controls";
+import { PricingFields } from "../ui/points-controls";
 
 type Props = {
   /** The chore to edit, or "new" to add one. null keeps the sheet closed. */
@@ -58,37 +58,57 @@ function Form({
     category: chore ? chore.category?.trim() || DEFAULT_CATEGORY : "",
     minutes: chore ? snapMinutes(chore.default_duration) : 15,
     tax: chore?.chore_tax ?? 0,
+    pricing: (chore?.pricing_type ?? "time_based") as PricingType,
+    bounty: chore?.fixed_bounty_points ?? DEFAULT_BOUNTY,
   };
   const [title, setTitle] = useState(original.title);
   const [category, setCategory] = useState(original.category);
   const [minutes, setMinutes] = useState(original.minutes);
   const [tax, setTax] = useState(original.tax);
+  const [pricing, setPricing] = useState<PricingType>(original.pricing);
+  const [bounty, setBounty] = useState(original.bounty);
   const [reprice, setReprice] = useState(true);
   const [busy, setBusy] = useState(false);
 
   const name = title.trim();
   const taken = titleTaken(state.library, name, chore?.id);
   const changed =
-    !chore || name !== original.title || (category.trim() || DEFAULT_CATEGORY) !== original.category || minutes !== original.minutes || tax !== original.tax;
+    !chore || name !== original.title || (category.trim() || DEFAULT_CATEGORY) !== original.category ||
+    minutes !== original.minutes ||
+    tax !== original.tax ||
+    pricing !== original.pricing ||
+    bounty !== original.bounty;
   const canSave = !!name && !taken && changed && !busy;
 
   const categories = libraryCategories(state.library);
   const pushLines = chore
     ? describePush(
-        { title: original.title, minutes: original.minutes, tax: original.tax },
-        { title: name, minutes, tax },
+        { title: original.title, minutes: original.minutes, tax: original.tax, pricing: original.pricing, bounty: original.bounty },
+        { title: name, minutes, tax, pricing, bounty },
         usage ?? NO_USAGE,
         reprice,
       )
     : [];
-  // Only a tax change reaches finished chores, so that is the only time the choice matters.
-  const askReprice = !!chore && tax !== original.tax && (usage?.done ?? 0) > 0;
+  // Finished chores are only re-priced when the value that priced them changed: the tax of a time-based chore or
+  // the bounty of a fixed one (never a switch of model), so that is the only time the choice matters.
+  const askReprice =
+    !!chore &&
+    (usage?.done ?? 0) > 0 &&
+    pricing === original.pricing &&
+    (pricing === "time_based" ? tax !== original.tax : bounty !== original.bounty);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!canSave) return;
     setBusy(true);
-    const input = { title: name, category: resolveCategory(categories, category) || DEFAULT_CATEGORY, minutes, tax };
+    const input = {
+      title: name,
+      category: resolveCategory(categories, category) || DEFAULT_CATEGORY,
+      minutes,
+      tax,
+      pricing,
+      bounty,
+    };
     if (!chore) {
       const ok = await actions.createLibraryChore(input);
       setBusy(false);
@@ -145,15 +165,20 @@ function Form({
         <CategoryCombobox id="manage-category" value={category} onChange={setCategory} categories={categories} />
       </div>
 
-      <div className="flex flex-col gap-1.5">
-        <label htmlFor="manage-minutes" className="text-sm font-extrabold">
-          Usual time
-        </label>
-        <DurationField inputId="manage-minutes" value={minutes} onChange={setMinutes} steps={ESTIMATE_STEPS} label="Usual minutes" />
-      </div>
-
-      <TaxField value={tax} onChange={setTax} />
-      <RewardPreview minutes={minutes} tax={tax} />
+      <PricingFields
+        pricing={pricing}
+        onPricing={setPricing}
+        bounty={bounty}
+        onBounty={setBounty}
+        minutes={minutes}
+        onMinutes={setMinutes}
+        tax={tax}
+        onTax={setTax}
+        steps={ESTIMATE_STEPS}
+        timeLabel="Usual time"
+        timeId="manage-minutes"
+        timeAriaLabel="Usual minutes"
+      />
 
       {chore && (
         <div className="rounded-2xl bg-raised px-4 py-3 text-sm" aria-live="polite">
