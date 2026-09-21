@@ -14,8 +14,15 @@ Next.js (App Router) + Tailwind on Vercel, Supabase for Postgres, Auth and Realt
    two variables under Project Settings → Environment Variables (they are inlined at build time).
 4. `npm install && npm run dev`
 
-The first partner signs up and chooses **Start one** (this seeds the six base chores and a few rewards and makes them the
-admin). The second signs up and chooses **Join partner** with the invite code from the profile menu.
+The first partner signs up and chooses **Start one** (this seeds the six base chores and a few rewards). The second signs up and
+chooses **Join partner** with the invite code from the profile menu. **Both partners have exactly the same access to
+everything**: there is no admin. (`profiles.is_admin` only marks who created the household, which decides each person's colour
+and which side of a joint challenge's counts is theirs; migration 0014 removed the last thing it gated, the rewards shop.)
+
+**Installed phone apps update themselves.** A home-screen app can stay open in the background for days on old code, so the app
+checks `/api/version` when it opens, when it returns to the foreground and every ten minutes. If a newer build is out it
+refreshes at once (unless a sheet is open) or shows a "Refresh" bar. This needs Vercel's `VERCEL_GIT_COMMIT_SHA` system variable
+(on by default); without it the check switches itself off.
 
 ## Database migrations run automatically
 

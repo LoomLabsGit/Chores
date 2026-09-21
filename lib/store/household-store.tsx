@@ -1025,7 +1025,7 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
         const prev = stateRef.current.challenges.find((c) => c.id === id);
         if (!prev || prev.status !== "active") return "failed";
         const finishes = prev.current_count + 1 >= prev.target_count;
-        // "a" is the household creator (the admin); a joint challenge tracks each partner's own taps.
+        // "a" is the household creator, "b" the partner (a marker only, no extra rights); a joint challenge tracks each partner's own taps.
         const iAmA = stateRef.current.members.find((m) => m.id === userId)?.is_admin ?? false;
         dispatch({
           type: "upsert",

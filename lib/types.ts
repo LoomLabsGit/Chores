@@ -13,6 +13,7 @@ export type Profile = {
   avatar_url: string | null;
   household_id: string;
   points: number;
+  /** Marks who created the household (colour A; side "a" of a joint challenge). Grants no extra rights. */
   is_admin: boolean;
   created_at: string;
 };

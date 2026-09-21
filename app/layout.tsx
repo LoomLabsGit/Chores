@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { PwaRegister } from "@/components/pwa-register";
 import { ToastProvider } from "@/components/toast";
+import { UpdateWatcher } from "@/components/update-watcher";
 
 export const metadata: Metadata = {
   title: { default: "DuoSync", template: "%s · DuoSync" },
@@ -27,6 +28,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="min-h-dvh antialiased">
         <ToastProvider>{children}</ToastProvider>
         <PwaRegister />
+        <UpdateWatcher />
       </body>
     </html>
   );

@@ -67,6 +67,7 @@ beforeAll(async () => {
   await db.exec(read("supabase/migrations/0011_point_ledger.sql"));
   await db.exec(read("supabase/migrations/0012_fixed_bounty_chores.sql"));
   await db.exec(read("supabase/migrations/0013_forfeit_and_joint_challenges.sql"));
+  await db.exec(read("supabase/migrations/0014_everyone_is_equal.sql"));
   for (const id of [ALEX, BLAKE, CASEY, DREW]) {
     await admin(`insert into auth.users (id, email) values ($1, $2)`, [id, `${id}@example.com`]);
   }
@@ -166,11 +167,21 @@ describe("row level security + privileges", () => {
     await expect(asAnon(`select * from public.redeem_reward(gen_random_uuid())`)).rejects.toThrow(/permission denied/);
   });
 
-  it("rewards: only the admin can add", async () => {
+  it("rewards: either partner can add one, but nobody can add to another household", async () => {
     await as(ALEX, `insert into public.rewards (household_id, title, cost) values (public.current_household_id(), 'Lie in', 60)`);
-    await expect(
-      as(BLAKE, `insert into public.rewards (household_id, title, cost) values (public.current_household_id(), 'Cheat', 1)`),
-    ).rejects.toThrow(/row-level security/);
+    await as(BLAKE, `insert into public.rewards (household_id, title, cost) values (public.current_household_id(), 'Breakfast out', 45)`);
+    expect((await as(ALEX, `select title from public.rewards where title = 'Breakfast out'`))).toHaveLength(1);
+    await as(DREW, `select * from public.create_household('Drew') `).catch(() => undefined);
+    const drews = (await admin(`select household_id from public.profiles where id = $1`, [DREW]))[0]?.household_id;
+    if (drews) {
+      await expect(
+        as(BLAKE, `insert into public.rewards (household_id, title, cost) values ($1, 'Cheat', 1)`, [drews]),
+      ).rejects.toThrow(/row-level security/);
+    }
+  });
+
+  it("there is no admin helper left to build a permission on", async () => {
+    await expect(as(ALEX, `select public.is_household_admin()`)).rejects.toThrow(/does not exist/);
   });
 });
 
@@ -2099,5 +2110,100 @@ describe("forfeit challenges and settlement", () => {
     await expect(as(ALEX, `select public.pay_challenge(c, 1, 'x', $1) from public.challenges c limit 1`, [ALEX])).rejects.toThrow(/permission denied/);
     await expect(asAnon(`select public.settle_my_challenges()`)).rejects.toThrow(/permission denied/);
     await expect(asAnon(`select * from public.create_challenge('x', gen_random_uuid(), 1, 1)`)).rejects.toThrow(/permission denied/);
+  });
+});
+
+// ===========================================================================
+// Both partners have exactly the same access. Nobody is "the admin".
+// Every scenario below runs twice: once as the household creator and once as the partner.
+// ===========================================================================
+describe.each([
+  ["the household creator", ALEX, BLAKE],
+  ["the partner", BLAKE, ALEX],
+] as const)("full access for %s", (_who, me, other) => {
+  const tag = me === ALEX ? "creator" : "partner";
+  const dayFromNow = async (n: number) => (await admin(`select (current_date + $1::int)::text as d`, [n]))[0].d as string;
+
+  it("manages the chore library: create, edit (pushed to the calendar), see usage, delete", async () => {
+    const [lib] = await as(me, `select * from public.create_library_chore($1, 'Access', 30, 3)`, [`Library ${tag}`]);
+    const inst = (await as(me, `insert into public.chore_instances (chore_id, title, household_id, assigned_to, scheduled_date, estimated_duration, chore_tax)
+                                values ($1, $2, public.current_household_id(), $3, $4, 30, 3) returning id`, [lib.id, lib.title, me, await dayFromNow(2)]))[0].id;
+    const [r] = await as(me, `select * from public.update_library_chore($1, $2, 'Access', 45, 7)`, [lib.id, `Library ${tag} v2`]);
+    expect(r.n_open).toBe(1);
+    expect((await admin(`select title, estimated_duration d, chore_tax t from public.chore_instances where id = $1`, [inst]))[0]).toEqual({ title: `Library ${tag} v2`, d: 45, t: 7 });
+    expect((await as(me, `select * from public.library_usage()`)).some((u) => u.library_id === lib.id)).toBe(true);
+    await as(me, `select public.delete_library_chore($1, true)`, [lib.id]);
+    expect(await admin(`select 1 from public.chore_instances where id = $1`, [inst])).toHaveLength(0);
+  });
+
+  it("schedules, completes, edits, unchecks, repeats and removes chores", async () => {
+    const id = await chore(me, `Chore ${tag}`, 2, me, "2026-09-10");
+    await as(me, `select * from public.complete_chore($1, 30, 100)`, [id]);
+    await as(me, `select * from public.edit_completed_chore($1, $2, $3, '2026-09-10', 45, null, null, null)`, [id, `Chore ${tag}`, me]);
+    await as(me, `select public.uncomplete_chore($1)`, [id]);
+    const rep = await chore(me, `Repeats ${tag}`, 0, me, await dayFromNow(1));
+    await as(me, `select public.make_chore_recurring($1, 'weekly')`, [rep]);
+    expect((await as(me, `select public.remove_chore_series($1) as n`, [rep]))[0].n).toBeGreaterThan(1);
+    expect(await as(me, `delete from public.chore_instances where id = $1 returning id`, [id])).toHaveLength(1);
+  });
+
+  it("creates, logs, reduces, edits and deletes every kind of challenge", async () => {
+    // individual, for yourself
+    const solo = (await as(me, `select * from public.create_challenge($1, $2, 3, 20)`, [`Solo ${tag}`, me]))[0];
+    expect(solo.status).toBe("active");
+    await as(me, `select * from public.increment_challenge($1)`, [solo.id]);
+    await as(me, `select * from public.increment_challenge($1)`, [solo.id]);
+    expect((await as(me, `select * from public.set_challenge_progress($1, 1)`, [solo.id]))[0].current_count).toBe(1); // "-"
+    await as(me, `select * from public.update_challenge($1, $2, 4, 25, $3)`, [solo.id, `Solo ${tag} v2`, me]);
+    await as(me, `select public.delete_challenge($1)`, [solo.id]);
+
+    // for your partner: they see it, accept it, and can manage it too
+    const gift = (await as(me, `select * from public.create_challenge($1, $2, 2, 10)`, [`For partner ${tag}`, other]))[0];
+    expect(gift.status).toBe("pending");
+    await as(other, `select * from public.respond_to_challenge($1, true)`, [gift.id]);
+    await as(me, `select * from public.set_challenge_progress($1, 0)`, [gift.id]); // reduce someone else's
+    await as(me, `select public.delete_challenge($1)`, [gift.id]);
+
+    // joint: assigned to both, active at once, visible and loggable by both
+    const joint = (await as(me, `select * from public.create_challenge($1, $2, 2, 20, 'reward', true, null, 0)`, [`Joint ${tag}`, me]))[0];
+    expect(joint).toMatchObject({ is_joint: true, status: "active" });
+    expect(await as(other, `select id from public.challenges where id = $1`, [joint.id])).toHaveLength(1);
+    await as(me, `select * from public.increment_challenge($1)`, [joint.id]);
+    await as(other, `select * from public.increment_challenge($1)`, [joint.id]);
+    expect((await admin(`select status from public.challenges where id = $1`, [joint.id]))[0].status).toBe("completed");
+    await as(other, `select * from public.set_challenge_progress($1, 1)`, [joint.id]); // either can reopen it
+    await as(me, `select public.delete_challenge($1)`, [joint.id]);
+
+    // forfeit
+    const ff = (await as(me, `select * from public.create_challenge($1, $2, 2, 0, 'forfeit', false, current_date + 3, 5)`, [`Forfeit ${tag}`, me]))[0];
+    expect(ff.type).toBe("forfeit");
+    await as(me, `select public.delete_challenge($1)`, [ff.id]);
+    await as(me, `select public.settle_my_challenges()`);
+  });
+
+  it("adds, edits, retires and redeems shop rewards", async () => {
+    await admin(`update public.profiles set points = 500 where id = $1`, [me]);
+    const [reward] = await as(
+      me,
+      `insert into public.rewards (id, household_id, title, description, cost)
+       values (gen_random_uuid(), public.current_household_id(), $1, 'from ${tag}', 25) returning *`,
+      [`Reward ${tag}`],
+    );
+    expect(reward.title).toBe(`Reward ${tag}`);
+    // the other partner sees it and can change it
+    expect(await as(other, `select 1 from public.rewards where id = $1`, [reward.id])).toHaveLength(1);
+    expect(await as(other, `update public.rewards set cost = 30 where id = $1 returning cost`, [reward.id])).toEqual([{ cost: 30 }]);
+    await as(me, `select * from public.redeem_reward($1)`, [reward.id]);
+    expect(await as(me, `update public.rewards set is_active = false where id = $1 returning is_active`, [reward.id])).toEqual([{ is_active: false }]);
+  });
+
+  it("can still not touch another household's data", async () => {
+    const [theirs] = await as(DREW, `select id from public.chore_library limit 1`);
+    await expect(as(me, `select public.delete_library_chore($1, true)`, [theirs.id])).rejects.toThrow(/not found/);
+    const theirHousehold = (await admin(`select household_id from public.profiles where id = $1`, [DREW]))[0].household_id;
+    await expect(as(me, `insert into public.rewards (id, household_id, title, cost) values (gen_random_uuid(), $1, 'x', 5)`, [theirHousehold]))
+      .rejects.toThrow(/row-level security/);
+    // ...and cannot retire or edit their rewards either
+    expect(await as(me, `update public.rewards set is_active = false where household_id = $1 returning id`, [theirHousehold])).toEqual([]);
   });
 });

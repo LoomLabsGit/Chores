@@ -2,7 +2,7 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 import { hasSupabaseEnv, supabaseEnv } from "@/lib/supabase/env";
 
-const PUBLIC_PREFIXES = ["/login", "/auth"];
+const PUBLIC_PREFIXES = ["/login", "/auth", "/api/version"];
 
 /** Refreshes the Supabase session cookie and gates the app behind sign-in. */
 export async function proxy(request: NextRequest) {

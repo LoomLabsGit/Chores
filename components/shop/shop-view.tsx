@@ -15,19 +15,16 @@ export function ShopView() {
   const [retiring, setRetiring] = useState<Reward | null>(null);
 
   const rewards = state.rewards.filter((r) => r.is_active).sort((a, b) => a.cost - b.cost);
-  const admin = state.members.find((m) => m.is_admin);
   const rewardTitle = (id: string | null) => state.rewards.find((r) => r.id === id)?.title ?? "A reward";
 
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between gap-3">
         <h1 className="text-2xl font-extrabold tracking-tight">Rewards</h1>
-        {me.is_admin && (
-          <button onClick={() => setAdding(true)} className={`${primaryButton} min-h-11 px-4`}>
-            <Icon name="plus" size={20} strokeWidth={2.6} />
-            Add
-          </button>
-        )}
+        <button onClick={() => setAdding(true)} className={`${primaryButton} min-h-11 px-4`}>
+          <Icon name="plus" size={20} strokeWidth={2.6} />
+          Add
+        </button>
       </div>
 
       <section
@@ -57,14 +54,12 @@ export function ShopView() {
 
       {rewards.length === 0 ? (
         <EmptyState icon={<Icon name="gift" size={26} />} title="No rewards yet">
-          {me.is_admin
-            ? "Add the first reward your household can spend points on."
-            : `Ask ${admin?.display_name ?? "the household admin"} to add some rewards.`}
+          Add the first reward your household can spend points on.
         </EmptyState>
       ) : (
         <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {rewards.map((r) => (
-            <RewardCard key={r.id} reward={r} onRetire={me.is_admin ? () => setRetiring(r) : undefined} />
+            <RewardCard key={r.id} reward={r} onRetire={() => setRetiring(r)} />
           ))}
         </ul>
       )}
