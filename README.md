@@ -6,7 +6,7 @@ Next.js (App Router) + Tailwind on Vercel, Supabase for Postgres, Auth and Realt
 ## Setup
 
 1. **Supabase project.** Create one, then apply the schema: paste each file in `supabase/migrations/` into the SQL editor,
-   **in order** (`0001_init.sql` … `0013_forfeit_and_joint_challenges.sql`), or use `supabase link` + `supabase db push`.
+   **in order** (`0001_init.sql` … `0015_reward_signoff.sql`), or use `supabase link` + `supabase db push`.
    After the first setup, new migration files are applied for you (see below).
 2. **Auth.** Email + password. If "Confirm email" is on, add `https://YOUR-DOMAIN/auth/callback` (and
    `http://localhost:3000/auth/callback`) under Authentication → URL Configuration.
@@ -117,6 +117,13 @@ in order (`0004_…`) and should be additive; a migration runs against live data
   the database has the `pg_cron` extension, hourly on the server (`settle_challenges_core`). "Midnight" is the household's own
   midnight, from `households.timezone` (default `Europe/London`; change it in the SQL editor if you live elsewhere). It is
   idempotent, so running from both places is safe.
+- **Reward sign-off** (migration 0015): a reward added to the shop starts as `pending` and cannot be redeemed by anyone until
+  the OTHER person approves it (the person who suggested it cannot). They see it under "Needs your sign-off" on the Rewards tab
+  and in the bell, with Approve / Decline; a decline shows to the suggester as "Declined" so they can remove it, and they can
+  withdraw a pending one. It is enforced in the database (a trigger stamps who added it and forces `pending`, clients cannot
+  write `status` / `created_by` or edit a reward's title, description or cost, and `redeem_reward` only redeems approved
+  rewards), so an out-of-date copy of the app cannot skip it. With nobody else in the household there is nobody to ask, so it is
+  approved at once. Rewards that existed before this stay approved. Only adding needs a sign-off; retiring is free for either.
 - **"Profile switcher"** is a profile menu (members, invite code, sign out): each partner signs in on their own device, so
   there is nothing to switch between.
 - **Common tasks** are matched by title against the six base chores; **Recent** is the five most recently scheduled.

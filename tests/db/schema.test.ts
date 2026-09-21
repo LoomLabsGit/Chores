@@ -68,6 +68,7 @@ beforeAll(async () => {
   await db.exec(read("supabase/migrations/0012_fixed_bounty_chores.sql"));
   await db.exec(read("supabase/migrations/0013_forfeit_and_joint_challenges.sql"));
   await db.exec(read("supabase/migrations/0014_everyone_is_equal.sql"));
+  await db.exec(read("supabase/migrations/0015_reward_signoff.sql"));
   for (const id of [ALEX, BLAKE, CASEY, DREW]) {
     await admin(`insert into auth.users (id, email) values ($1, $2)`, [id, `${id}@example.com`]);
   }
@@ -1492,7 +1493,7 @@ describe("point ledger", () => {
   it("logs redeeming a reward against the reward, and refuses when the balance is short", async () => {
     await admin(`update public.profiles set points = 100 where id = $1`, [ALEX]);
     const t0 = await now();
-    const [reward] = await as(ALEX, `select id, title, cost from public.rewards where is_active order by cost limit 1`);
+    const [reward] = await as(ALEX, `select id, title, cost from public.rewards where is_active and status = 'approved' order by cost limit 1`);
     await as(ALEX, `select * from public.redeem_reward($1)`, [reward.id]);
     const r = await expectChain(ALEX, t0, 100);
     expect(r).toEqual([{ delta: -reward.cost, balance_after: 100 - reward.cost, reason: `Reward redeemed: ${reward.title}`, reference_id: reward.id }]);
@@ -2181,7 +2182,7 @@ describe.each([
     await as(me, `select public.settle_my_challenges()`);
   });
 
-  it("adds, edits, retires and redeems shop rewards", async () => {
+  it("adds a shop reward (the other person signs it off), redeems it, and retires it", async () => {
     await admin(`update public.profiles set points = 500 where id = $1`, [me]);
     const [reward] = await as(
       me,
@@ -2189,10 +2190,10 @@ describe.each([
        values (gen_random_uuid(), public.current_household_id(), $1, 'from ${tag}', 25) returning *`,
       [`Reward ${tag}`],
     );
-    expect(reward.title).toBe(`Reward ${tag}`);
-    // the other partner sees it and can change it
+    expect(reward).toMatchObject({ title: `Reward ${tag}`, status: "pending", created_by: me });
+    // the other partner sees it and is the one who can approve it
     expect(await as(other, `select 1 from public.rewards where id = $1`, [reward.id])).toHaveLength(1);
-    expect(await as(other, `update public.rewards set cost = 30 where id = $1 returning cost`, [reward.id])).toEqual([{ cost: 30 }]);
+    await as(other, `select * from public.respond_to_reward($1, true)`, [reward.id]);
     await as(me, `select * from public.redeem_reward($1)`, [reward.id]);
     expect(await as(me, `update public.rewards set is_active = false where id = $1 returning is_active`, [reward.id])).toEqual([{ is_active: false }]);
   });
@@ -2205,5 +2206,136 @@ describe.each([
       .rejects.toThrow(/row-level security/);
     // ...and cannot retire or edit their rewards either
     expect(await as(me, `update public.rewards set is_active = false where household_id = $1 returning id`, [theirHousehold])).toEqual([]);
+  });
+});
+
+// ===========================================================================
+// 0015 - a new reward has to be signed off by the other person
+// ===========================================================================
+describe("reward sign-off", () => {
+  let n = 0;
+  const propose = async (user: string, cost = 40, title = `Signoff ${++n}`) =>
+    (await as(user, `insert into public.rewards (id, household_id, title, description, cost)
+                     values (gen_random_uuid(), public.current_household_id(), $1, 'test', $2) returning *`, [title, cost]))[0];
+  const answer = (user: string, id: string, approve: boolean) => as(user, `select * from public.respond_to_reward($1, $2)`, [id, approve]);
+  const redeem = (user: string, id: string) => as(user, `select * from public.redeem_reward($1)`, [id]);
+  const row = async (id: string) => (await admin(`select * from public.rewards where id = $1`, [id]))[0];
+  const notes = (uid: string, id: string) => as(uid, `select type, message from public.notifications where reference_id = $1 and type like 'reward_%'`, [id]);
+  const rich = () => admin(`update public.profiles set points = 1000 where id in ($1, $2)`, [ALEX, BLAKE]);
+
+  it.each([
+    ["the creator suggests, the partner signs off", ALEX, BLAKE, "Alex", "Blake"],
+    ["the partner suggests, the creator signs off", BLAKE, ALEX, "Blake", "Alex"],
+  ])("%s", async (_label, adder, approver, adderName, approverName) => {
+    await rich();
+    const r = await propose(adder, 40, `Two way ${adderName}`);
+    expect(r).toMatchObject({ status: "pending", created_by: adder, approved_by: null, approved_at: null });
+    expect(await notes(approver, r.id)).toEqual([
+      { type: "reward_proposed", message: `${adderName} suggested a reward: Two way ${adderName} (40 pts). It needs your sign-off` },
+    ]);
+    expect(await notes(adder, r.id)).toEqual([]); // nobody tells you about your own suggestion
+
+    const approved = (await answer(approver, r.id, true))[0];
+    expect(approved).toMatchObject({ status: "approved", approved_by: approver });
+    expect(approved.approved_at).not.toBeNull();
+    expect(await notes(adder, r.id)).toEqual([{ type: "reward_approved", message: `${approverName} approved your reward: Two way ${adderName}` }]);
+    // the request in the approver's inbox is marked read once answered
+    expect(await as(approver, `select 1 from public.notifications where reference_id = $1 and type = 'reward_proposed' and not is_read`, [r.id])).toHaveLength(0);
+
+    await redeem(adder, r.id); // now either of them can spend on it
+    await redeem(approver, r.id);
+  });
+
+  it("cannot be redeemed by anyone until it is approved", async () => {
+    await rich();
+    const r = await propose(ALEX);
+    await expect(redeem(ALEX, r.id)).rejects.toThrow(/no longer available/);
+    await expect(redeem(BLAKE, r.id)).rejects.toThrow(/no longer available/);
+    expect(await admin(`select 1 from public.reward_redemptions where reward_id = $1`, [r.id])).toHaveLength(0);
+  });
+
+  it("the person who suggested it cannot sign it off, and neither can outsiders", async () => {
+    const r = await propose(ALEX);
+    await expect(answer(ALEX, r.id, true)).rejects.toThrow(/other person has to sign off/);
+    await expect(answer(ALEX, r.id, false)).rejects.toThrow(/other person has to sign off/);
+    await expect(answer(DREW, r.id, true)).rejects.toThrow(/not found/); // another household
+    await expect(answer(BLAKE, "00000000-0000-4000-8000-0000000000ff", true)).rejects.toThrow(/not found/);
+    await expect(asAnon(`select * from public.respond_to_reward($1, true)`, [r.id])).rejects.toThrow(/permission denied/);
+    expect((await row(r.id)).status).toBe("pending");
+  });
+
+  it("can be declined: it stays out of the shop, the suggester is told, and it cannot be answered again", async () => {
+    await rich();
+    const r = await propose(BLAKE, 30, "Declined one");
+    const declined = (await answer(ALEX, r.id, false))[0];
+    expect(declined).toMatchObject({ status: "declined", approved_by: null, approved_at: null });
+    expect(await notes(BLAKE, r.id)).toEqual([{ type: "reward_declined", message: "Alex declined your reward: Declined one" }]);
+    await expect(redeem(BLAKE, r.id)).rejects.toThrow(/no longer available/);
+    await expect(redeem(ALEX, r.id)).rejects.toThrow(/no longer available/);
+    await expect(answer(ALEX, r.id, true)).rejects.toThrow(/already been answered/);
+  });
+
+  it("an answered reward cannot be answered a second time", async () => {
+    const r = await propose(ALEX);
+    await answer(BLAKE, r.id, true);
+    await expect(answer(BLAKE, r.id, false)).rejects.toThrow(/already been answered/);
+    expect((await row(r.id)).status).toBe("approved");
+  });
+
+  it("the suggester can withdraw a pending reward before it is answered", async () => {
+    const r = await propose(ALEX);
+    expect(await as(ALEX, `update public.rewards set is_active = false where id = $1 returning is_active`, [r.id])).toEqual([{ is_active: false }]);
+    await expect(answer(BLAKE, r.id, true)).rejects.toThrow(/not found/);
+  });
+
+  it("a client cannot skip the sign-off, however it asks", async () => {
+    // it cannot name its own status, author or approver...
+    await expect(as(ALEX, `insert into public.rewards (household_id, title, cost, status) values (public.current_household_id(), 'Sneaky', 5, 'approved')`)).rejects.toThrow(/permission denied/);
+    await expect(as(ALEX, `insert into public.rewards (household_id, title, cost, created_by) values (public.current_household_id(), 'Sneaky', 5, $1)`, [BLAKE])).rejects.toThrow(/permission denied/);
+    await expect(as(ALEX, `insert into public.rewards (household_id, title, cost, approved_by) values (public.current_household_id(), 'Sneaky', 5, $1)`, [BLAKE])).rejects.toThrow(/permission denied/);
+    // ...an ordinary insert is forced through the sign-off...
+    const plain = await propose(ALEX);
+    expect(plain.status).toBe("pending");
+    // ...and it cannot approve by editing the row, or change what was approved.
+    await expect(as(BLAKE, `update public.rewards set status = 'approved' where id = $1`, [plain.id])).rejects.toThrow(/permission denied/);
+    await expect(as(ALEX, `update public.rewards set status = 'approved' where id = $1`, [plain.id])).rejects.toThrow(/permission denied/);
+    await expect(as(BLAKE, `update public.rewards set cost = 1 where id = $1`, [plain.id])).rejects.toThrow(/permission denied/);
+    await expect(as(BLAKE, `update public.rewards set title = 'Renamed' where id = $1`, [plain.id])).rejects.toThrow(/permission denied/);
+    await expect(as(BLAKE, `update public.rewards set description = 'x' where id = $1`, [plain.id])).rejects.toThrow(/permission denied/);
+    await expect(as(BLAKE, `update public.rewards set approved_by = $2 where id = $1`, [plain.id, BLAKE])).rejects.toThrow(/permission denied/);
+    expect((await row(plain.id)).status).toBe("pending");
+  });
+
+  it("nobody can add a reward to someone else's household", async () => {
+    const theirs = (await admin(`select household_id from public.profiles where id = $1`, [DREW]))[0].household_id;
+    await expect(as(ALEX, `insert into public.rewards (household_id, title, cost) values ($1, 'Intruder', 5)`, [theirs])).rejects.toThrow(/row-level security/);
+  });
+
+  it("with nobody else in the household there is nobody to ask, so it is approved at once", async () => {
+    await admin(`update public.profiles set points = 500 where id = $1`, [DREW]);
+    const r = await propose(DREW, 20, "Solo treat");
+    expect(r).toMatchObject({ status: "approved", created_by: DREW });
+    expect(r.approved_at).not.toBeNull();
+    expect(await notes(DREW, r.id)).toEqual([]);
+    await redeem(DREW, r.id);
+  });
+
+  it("the rewards every household starts with are already approved", async () => {
+    const seeded = await as(ALEX, `select status from public.rewards where title in ('Pick the film', 'Breakfast in bed')`);
+    expect(seeded.length).toBe(2);
+    expect(seeded.every((s) => s.status === "approved")).toBe(true);
+  });
+
+  it("existing and trusted server-side rows default to approved (how today's rewards were carried over)", async () => {
+    const hh = (await admin(`select household_id from public.profiles where id = $1`, [ALEX]))[0].household_id;
+    const [r] = await admin(`insert into public.rewards (household_id, title, cost) values ($1, 'Legacy', 10) returning *`, [hh]);
+    expect(r.status).toBe("approved");
+  });
+
+  it("a pending reward is visible to both partners and to nobody else", async () => {
+    const r = await propose(ALEX);
+    expect(await as(ALEX, `select 1 from public.rewards where id = $1`, [r.id])).toHaveLength(1);
+    expect(await as(BLAKE, `select 1 from public.rewards where id = $1`, [r.id])).toHaveLength(1);
+    expect(await as(DREW, `select 1 from public.rewards where id = $1`, [r.id])).toHaveLength(0);
   });
 });

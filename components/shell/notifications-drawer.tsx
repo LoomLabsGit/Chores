@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { pendingProposals } from "@/lib/logic/notifications";
+import { awaitingMySignoff } from "@/lib/logic/rewards";
 import { timeAgo } from "@/lib/logic/dates";
 import { useHousehold } from "@/lib/store/household-store";
 import type { AppNotification, NotificationType } from "@/lib/types";
@@ -19,6 +20,9 @@ const TYPE_ICON: Record<NotificationType, IconName> = {
   reward_redeemed: "gift",
   points_adjusted: "star",
   challenge_expired: "alert",
+  reward_proposed: "gift",
+  reward_approved: "gift",
+  reward_declined: "gift",
 };
 
 export function NotificationsDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -41,10 +45,12 @@ function NotificationList() {
   }, [actions, state.notifications.length]);
 
   const proposals = pendingProposals(state.challenges, me.id);
-  const pendingIds = new Set(proposals.map((c) => c.id));
-  // A pending proposal is shown once, with buttons, in "Needs your reply".
+  const signoffs = awaitingMySignoff(state.rewards, me.id);
+  const pendingIds = new Set([...proposals.map((c) => c.id), ...signoffs.map((r) => r.id)]);
+  // A pending proposal or reward sign-off is shown once, with buttons, in "Needs your reply".
   const events = state.notifications.filter(
-    (n) => !(n.type === "challenge_proposed" && n.reference_id && pendingIds.has(n.reference_id)),
+    (n) =>
+      !((n.type === "challenge_proposed" || n.type === "reward_proposed") && n.reference_id && pendingIds.has(n.reference_id)),
   );
 
   async function respond(id: string, accept: boolean) {
@@ -53,19 +59,52 @@ function NotificationList() {
     setBusy(null);
   }
 
-  if (!proposals.length && !events.length) {
+  async function signoff(id: string, approve: boolean) {
+    setBusy(id);
+    await actions.respondToReward(id, approve);
+    setBusy(null);
+  }
+
+  if (!proposals.length && !signoffs.length && !events.length) {
     return (
       <EmptyState icon={<Icon name="bell" size={26} />} title="All caught up">
-        Chores your partner assigns, challenges and reward redemptions will show up here.
+        Chores your partner assigns, challenges, reward suggestions and redemptions will show up here.
       </EmptyState>
     );
   }
 
   return (
     <div className="flex flex-col gap-5">
-      {proposals.length > 0 && (
+      {(proposals.length > 0 || signoffs.length > 0) && (
         <section aria-label="Needs your reply" className="flex flex-col gap-2">
           <h3 className="text-xs font-extrabold uppercase tracking-wide text-muted">Needs your reply</h3>
+          {signoffs.map((r) => (
+            <article key={r.id} className="rounded-2xl border border-brand/30 bg-brand-soft p-4">
+              <p className="text-sm font-semibold text-muted">
+                {state.members.find((m) => m.id === r.created_by)?.display_name ?? "Your partner"} suggested a reward
+              </p>
+              <p className="mt-0.5 text-base font-extrabold">{r.title}</p>
+              <p className="mt-1 text-sm text-muted">
+                <span className="font-bold text-gold">{r.cost} pts</span> &middot; goes in the shop once you approve it
+              </p>
+              <div className="mt-3 flex gap-2">
+                <button
+                  disabled={busy === r.id}
+                  onClick={() => signoff(r.id, false)}
+                  className="min-h-11 flex-1 rounded-xl border border-line bg-surface font-bold disabled:opacity-50"
+                >
+                  Decline
+                </button>
+                <button
+                  disabled={busy === r.id}
+                  onClick={() => signoff(r.id, true)}
+                  className="min-h-11 flex-1 rounded-xl bg-brand font-extrabold text-brand-ink disabled:opacity-50"
+                >
+                  Approve
+                </button>
+              </div>
+            </article>
+          ))}
           {proposals.map((c) => (
             <article key={c.id} className="rounded-2xl border border-brand/30 bg-brand-soft p-4">
               <p className="text-sm font-semibold text-muted">

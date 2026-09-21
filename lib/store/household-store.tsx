@@ -295,7 +295,13 @@ export type Actions = {
   /** Resolves to "completed" when this tap finished the challenge. */
   incrementChallenge: (id: string) => Promise<"ok" | "completed" | "failed">;
   redeemReward: (id: string) => Promise<boolean>;
-  addReward: (input: { title: string; description: string; cost: number }) => Promise<boolean>;
+  /**
+   * Suggest a reward. Unless you are on your own, it stays "pending" until the other person signs it off.
+   * Resolves to the reward as the server saved it, or null if it failed.
+   */
+  addReward: (input: { title: string; description: string; cost: number }) => Promise<Reward | null>;
+  /** The other person's answer to a suggested reward. Resolves to the updated reward, or null. */
+  respondToReward: (id: string, approve: boolean) => Promise<Reward | null>;
   setRewardActive: (id: string, active: boolean) => Promise<boolean>;
   markAllRead: () => Promise<void>;
   loadStats: (startISO: string) => Promise<StatsData | null>;
@@ -1138,9 +1144,27 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           .insert({ id, household_id: householdIdNow(), title: title.trim(), description: description.trim() || null, cost })
           .select()
           .single();
-        if (error) return fail(error);
+        if (error) {
+          fail(error);
+          return null;
+        }
         dispatch({ type: "upsert", key: "rewards", row: data as Reward });
-        return true;
+        return data as Reward;
+      },
+
+      async respondToReward(id, approve) {
+        const { data, error } = await supabase.rpc("respond_to_reward", { p_reward_id: id, p_approve: approve });
+        if (error) {
+          resync();
+          fail(error);
+          return null;
+        }
+        dispatch({ type: "upsert", key: "rewards", row: data as Reward });
+        // The request in the bell is answered now.
+        stateRef.current.notifications
+          .filter((n) => n.type === "reward_proposed" && n.reference_id === id && !n.is_read)
+          .forEach((n) => dispatch({ type: "upsert", key: "notifications", row: { ...n, is_read: true } }));
+        return data as Reward;
       },
 
       async setRewardActive(id, active) {

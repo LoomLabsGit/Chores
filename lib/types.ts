@@ -112,6 +112,9 @@ export type Challenge = {
   completed_by_b_count: number;
 };
 
+/** A new reward is "pending" until the other person signs it off; they can also decline it. */
+export type RewardStatus = "pending" | "approved" | "declined";
+
 export type Reward = {
   id: string;
   household_id: string;
@@ -120,6 +123,11 @@ export type Reward = {
   cost: number;
   is_active: boolean;
   created_at: string;
+  status: RewardStatus;
+  /** Who added it. The OTHER person is the one who can sign it off. */
+  created_by: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
 };
 
 export type RewardRedemption = {
@@ -139,7 +147,10 @@ export type NotificationType =
   | "challenge_completed"
   | "reward_redeemed"
   | "points_adjusted"
-  | "challenge_expired";
+  | "challenge_expired"
+  | "reward_proposed"
+  | "reward_approved"
+  | "reward_declined";
 
 export type AppNotification = {
   id: string;

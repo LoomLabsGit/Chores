@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { timeAgo } from "@/lib/logic/dates";
+import { awaitingMySignoff, awaitingPartner, declinedMine, inShop } from "@/lib/logic/rewards";
 import { useHousehold } from "@/lib/store/household-store";
 import type { Reward } from "@/lib/types";
 import { Icon } from "../icons";
@@ -14,7 +15,11 @@ export function ShopView() {
   const [adding, setAdding] = useState(false);
   const [retiring, setRetiring] = useState<Reward | null>(null);
 
-  const rewards = state.rewards.filter((r) => r.is_active).sort((a, b) => a.cost - b.cost);
+  // A new reward only reaches the shop once the OTHER person has signed it off.
+  const rewards = inShop(state.rewards);
+  const toSignOff = awaitingMySignoff(state.rewards, me.id);
+  const waiting = awaitingPartner(state.rewards, me.id);
+  const declined = declinedMine(state.rewards, me.id);
   const rewardTitle = (id: string | null) => state.rewards.find((r) => r.id === id)?.title ?? "A reward";
 
   return (
@@ -26,6 +31,15 @@ export function ShopView() {
           Add
         </button>
       </div>
+
+      {toSignOff.length > 0 && (
+        <section aria-label="Needs your sign-off" className="flex flex-col gap-3">
+          <h2 className="text-xs font-extrabold uppercase tracking-wide text-muted">Needs your sign-off</h2>
+          {toSignOff.map((r) => (
+            <SignoffCard key={r.id} reward={r} />
+          ))}
+        </section>
+      )}
 
       <section
         aria-label="Your balance"
@@ -55,6 +69,7 @@ export function ShopView() {
       {rewards.length === 0 ? (
         <EmptyState icon={<Icon name="gift" size={26} />} title="No rewards yet">
           Add the first reward your household can spend points on.
+          {partner && ` ${partner.display_name} signs it off before it appears here.`}
         </EmptyState>
       ) : (
         <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -62,6 +77,26 @@ export function ShopView() {
             <RewardCard key={r.id} reward={r} onRetire={() => setRetiring(r)} />
           ))}
         </ul>
+      )}
+
+      {waiting.length > 0 && (
+        <section aria-label="Waiting for sign-off" className="flex flex-col gap-2">
+          <h2 className="text-xs font-extrabold uppercase tracking-wide text-muted">
+            Waiting for {partner?.display_name ?? "sign-off"}
+          </h2>
+          {waiting.map((r) => (
+            <OwnRewardRow key={r.id} reward={r} kind="waiting" />
+          ))}
+        </section>
+      )}
+
+      {declined.length > 0 && (
+        <section aria-label="Declined rewards" className="flex flex-col gap-2">
+          <h2 className="text-xs font-extrabold uppercase tracking-wide text-muted">Declined</h2>
+          {declined.map((r) => (
+            <OwnRewardRow key={r.id} reward={r} kind="declined" />
+          ))}
+        </section>
       )}
 
       {state.redemptions.length > 0 && (
@@ -98,6 +133,74 @@ export function ShopView() {
           if (r) void actions.setRewardActive(r.id, false);
         }}
       />
+    </div>
+  );
+}
+
+/** A reward the other person suggested: it is not in the shop until you say so. */
+function SignoffCard({ reward }: { reward: Reward }) {
+  const { nameOf, actions } = useHousehold();
+  const { toast } = useToast();
+  const [busy, setBusy] = useState(false);
+
+  async function answer(approve: boolean) {
+    setBusy(true);
+    const r = await actions.respondToReward(reward.id, approve);
+    setBusy(false);
+    if (r) toast(approve ? `Approved. ${reward.title} is in the shop` : `Declined ${reward.title}`, approve ? "success" : "info");
+  }
+
+  return (
+    <article className="rounded-3xl border border-brand/30 bg-brand-soft p-4">
+      <p className="text-sm font-semibold text-muted">{nameOf(reward.created_by)} suggested a reward</p>
+      <div className="mt-0.5 flex items-start justify-between gap-2">
+        <h3 className="text-lg font-extrabold leading-snug">{reward.title}</h3>
+        <span className="flex shrink-0 items-center gap-1 rounded-full bg-gold-soft px-2.5 py-1 text-sm font-extrabold text-gold">
+          <Icon name="star" size={13} />
+          {reward.cost}
+        </span>
+      </div>
+      {reward.description && <p className="mt-1 text-sm text-muted">{reward.description}</p>}
+      <p className="mt-2 text-xs font-semibold text-muted">
+        It only goes in the shop once you approve it, and then either of you can redeem it.
+      </p>
+      <div className="mt-3 flex gap-2">
+        <button
+          disabled={busy}
+          onClick={() => answer(false)}
+          className="min-h-12 flex-1 rounded-2xl border border-line bg-surface font-bold disabled:opacity-50"
+        >
+          Decline
+        </button>
+        <button disabled={busy} onClick={() => answer(true)} className={`${primaryButton} flex-1`}>
+          Approve
+        </button>
+      </div>
+    </article>
+  );
+}
+
+/** A reward I suggested: waiting for the other person, or turned down. Either way I can take it back. */
+function OwnRewardRow({ reward, kind }: { reward: Reward; kind: "waiting" | "declined" }) {
+  const { actions } = useHousehold();
+  const { toast } = useToast();
+  return (
+    <div className="flex min-h-14 items-center gap-3 rounded-2xl bg-raised py-2.5 pl-4 pr-2">
+      <div className="min-w-0 flex-1">
+        <p className="truncate font-bold">{reward.title}</p>
+        <p className="text-xs text-muted">{reward.cost} pts</p>
+      </div>
+      <span
+        className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-extrabold ${kind === "declined" ? "bg-danger-soft text-danger" : "bg-warn-soft text-warn"}`}
+      >
+        {kind === "declined" ? "Declined" : "Awaiting sign-off"}
+      </span>
+      <button
+        onClick={() => void actions.setRewardActive(reward.id, false).then((ok) => ok && toast(kind === "declined" ? "Removed" : "Withdrawn", "info"))}
+        className="min-h-11 shrink-0 rounded-xl px-3 text-sm font-bold text-muted hover:text-danger"
+      >
+        {kind === "declined" ? "Remove" : "Withdraw"}
+      </button>
     </div>
   );
 }
@@ -156,7 +259,7 @@ function AddRewardSheet({ open, onClose }: { open: boolean; onClose: () => void 
 }
 
 function AddRewardForm({ onClose }: { onClose: () => void }) {
-  const { actions } = useHousehold();
+  const { partner, actions } = useHousehold();
   const { toast } = useToast();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -167,12 +270,12 @@ function AddRewardForm({ onClose }: { onClose: () => void }) {
     e.preventDefault();
     if (!title.trim()) return;
     setBusy(true);
-    const ok = await actions.addReward({ title, description, cost });
+    const added = await actions.addReward({ title, description, cost });
     setBusy(false);
-    if (ok) {
-      onClose();
-      toast("Reward added", "success");
-    }
+    if (!added) return;
+    onClose();
+    // Anything added while there is a partner waits for their sign-off.
+    toast(added.status === "pending" ? `Sent to ${partner?.display_name ?? "your partner"} to sign off` : "Reward added", "success");
   }
 
   return (
@@ -205,8 +308,13 @@ function AddRewardForm({ onClose }: { onClose: () => void }) {
         <p className="text-sm font-extrabold">Cost</p>
         <Stepper label="cost in points" value={cost} min={1} max={2000} step={5} unit=" pts" onChange={setCost} />
       </div>
+      {partner && (
+        <p className="rounded-2xl bg-raised px-4 py-3 text-sm font-semibold text-muted">
+          {partner.display_name} has to sign this off before it appears in the shop.
+        </p>
+      )}
       <button type="submit" disabled={busy || !title.trim()} className={`${primaryButton} min-h-14 text-lg`}>
-        Add reward
+        {partner ? "Send for sign-off" : "Add reward"}
       </button>
     </form>
   );

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { badgeCount } from "@/lib/logic/notifications";
+import { awaitingMySignoff, awaitingPartner, declinedMine, inShop } from "@/lib/logic/rewards";
 import {
   contributionLine,
   daysUntil,
@@ -51,6 +52,7 @@ import type {
   Challenge,
   ChoreCompletion,
   ChoreLibraryItem,
+  Reward,
   RewardRedemption,
 } from "@/lib/types";
 
@@ -745,5 +747,73 @@ describe("forfeit and joint challenge helpers", () => {
     });
     expect(stats.perUser.a.challengePoints).toBe(8); // half of 15, rounded up
     expect(stats.perUser.b.challengePoints).toBe(8 + 20);
+  });
+});
+
+describe("reward sign-off", () => {
+  const reward = (over: Partial<Reward>): Reward => ({
+    id: Math.random().toString(),
+    household_id: "h",
+    title: "Massage",
+    description: null,
+    cost: 50,
+    is_active: true,
+    created_at: "2026-09-18T10:00:00Z",
+    status: "approved",
+    created_by: "them",
+    approved_by: null,
+    approved_at: null,
+    ...over,
+  });
+
+  it("only approved, live rewards reach the shop, cheapest first", () => {
+    const list = [
+      reward({ id: "a", cost: 60 }),
+      reward({ id: "b", cost: 20 }),
+      reward({ id: "c", cost: 5, status: "pending" }),
+      reward({ id: "d", cost: 5, status: "declined" }),
+      reward({ id: "e", cost: 5, is_active: false }),
+    ];
+    expect(inShop(list).map((r) => r.id)).toEqual(["b", "a"]);
+  });
+
+  it("splits pending rewards into 'waiting for me' and 'waiting for them'", () => {
+    const list = [
+      reward({ id: "theirs", status: "pending", created_by: "them" }),
+      reward({ id: "mine", status: "pending", created_by: "me" }),
+      reward({ id: "done", status: "approved", created_by: "them" }),
+      reward({ id: "withdrawn", status: "pending", created_by: "them", is_active: false }),
+    ];
+    expect(awaitingMySignoff(list, "me").map((r) => r.id)).toEqual(["theirs"]); // never my own
+    expect(awaitingPartner(list, "me").map((r) => r.id)).toEqual(["mine"]);
+  });
+
+  it("shows me my declined rewards, and nobody else's", () => {
+    const list = [
+      reward({ id: "mine", status: "declined", created_by: "me" }),
+      reward({ id: "theirs", status: "declined", created_by: "them" }),
+      reward({ id: "gone", status: "declined", created_by: "me", is_active: false }),
+    ];
+    expect(declinedMine(list, "me").map((r) => r.id)).toEqual(["mine"]);
+  });
+
+  const note = (over: Partial<AppNotification>): AppNotification => ({
+    id: Math.random().toString(),
+    recipient_id: "me",
+    actor_id: "them",
+    type: "reward_proposed",
+    reference_id: null,
+    message: "m",
+    is_read: false,
+    created_at: "2026-09-18T10:00:00Z",
+    ...over,
+  });
+
+  it("counts a sign-off waiting on me in the bell once, and keeps counting it after the alert is read", () => {
+    const r = reward({ id: "r1", status: "pending", created_by: "them" });
+    expect(badgeCount([note({ reference_id: "r1" })], [], "me", [r])).toBe(1); // the unread alert, not double counted
+    expect(badgeCount([note({ reference_id: "r1", is_read: true })], [], "me", [r])).toBe(1); // read, but still owed an answer
+    expect(badgeCount([], [], "me", [reward({ id: "r2", status: "approved" })])).toBe(0);
+    expect(badgeCount([], [], "me", [reward({ id: "r3", status: "pending", created_by: "me" })])).toBe(0); // my own is not mine to answer
   });
 });

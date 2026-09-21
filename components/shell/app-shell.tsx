@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import { badgeCount } from "@/lib/logic/notifications";
+import { awaitingMySignoff } from "@/lib/logic/rewards";
 import { useHousehold } from "@/lib/store/household-store";
 import { Icon, type IconName } from "../icons";
 import { NotificationsDrawer } from "./notifications-drawer";
@@ -32,7 +33,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 function TopBar() {
   const { me, state } = useHousehold();
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const badge = badgeCount(state.notifications, state.challenges, me.id);
+  const badge = badgeCount(state.notifications, state.challenges, me.id, state.rewards);
 
   return (
     <>
@@ -77,6 +78,7 @@ function NavBar() {
   const pathname = usePathname();
   const { me, state } = useHousehold();
   const proposals = state.challenges.filter((c) => c.status === "pending" && c.assigned_to === me.id).length;
+  const signoffs = awaitingMySignoff(state.rewards, me.id).length;
 
   return (
     <nav
@@ -101,8 +103,11 @@ function NavBar() {
                   <Icon name={item.icon} size={22} strokeWidth={active ? 2.4 : 2} />
                 </span>
                 {item.label}
-                {item.href === "/challenges" && proposals > 0 && (
-                  <span aria-label={`${proposals} waiting`} className="absolute right-[calc(50%-1.5rem)] top-1 h-2.5 w-2.5 rounded-full bg-danger ring-2 ring-surface" />
+                {((item.href === "/challenges" && proposals > 0) || (item.href === "/shop" && signoffs > 0)) && (
+                  <span
+                    aria-label={`${item.href === "/shop" ? signoffs : proposals} waiting`}
+                    className="absolute right-[calc(50%-1.5rem)] top-1 h-2.5 w-2.5 rounded-full bg-danger ring-2 ring-surface"
+                  />
                 )}
               </Link>
             </li>
