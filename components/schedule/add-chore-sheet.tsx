@@ -20,14 +20,17 @@ import { Icon } from "../icons";
 import { useToast } from "../toast";
 import { CategoryChips } from "../ui/category-chips";
 import { CategoryCombobox } from "../ui/category-combobox";
-import { fieldClass, primaryButton } from "../ui/controls";
+import { fieldClass, primaryButton, Segmented } from "../ui/controls";
 import { AssigneeField, PricingFields } from "../ui/points-controls";
 import { Modal } from "../ui/modal";
 
 /** What the user picked in step 1, waiting for "when / who / repeat" in step 2. */
 type Draft =
   | { kind: "library"; chore: ChoreLibraryItem }
-  | { kind: "new"; title: string };
+  | { kind: "new"; title: string; oneOff: boolean };
+
+/** Whether a chore typed in is kept in the chore list to reuse ("repeat") or is for the calendar only ("one_off"). */
+type Mode = "one_off" | "repeat";
 
 type Props = {
   open: boolean;
@@ -50,6 +53,8 @@ function Sheet({ date, onClose, onAdded }: Omit<Props, "open">) {
   const [typed, setTyped] = useState("");
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<string | null>(null);
+  const [mode, setMode] = useState<Mode>("repeat");
+  const oneOff = mode === "one_off";
 
   return (
     <Modal
@@ -73,9 +78,11 @@ function Sheet({ date, onClose, onAdded }: Omit<Props, "open">) {
         draft ? undefined : (
           <NewChoreInput
             initial={typed}
+            mode={mode}
+            onMode={setMode}
             onNext={(title) => {
               setTyped(title);
-              setDraft({ kind: "new", title });
+              setDraft({ kind: "new", title, oneOff });
             }}
           />
         )
@@ -86,9 +93,10 @@ function Sheet({ date, onClose, onAdded }: Omit<Props, "open">) {
       ) : (
         <Library
           onPick={(chore) => setDraft({ kind: "library", chore })}
+          oneOff={oneOff}
           onCreate={(title) => {
             setTyped(title);
-            setDraft({ kind: "new", title });
+            setDraft({ kind: "new", title, oneOff });
           }}
           onManage={onClose}
           query={query}
@@ -124,6 +132,7 @@ function Pill({ chore, onPick }: { chore: ChoreLibraryItem; onPick: (c: ChoreLib
 function Library({
   onPick,
   onCreate,
+  oneOff,
   onManage,
   query,
   onQuery,
@@ -132,6 +141,8 @@ function Library({
 }: {
   onPick: (c: ChoreLibraryItem) => void;
   onCreate: (title: string) => void;
+  /** The mode chosen above the text box, so the "Create ..." shortcut follows it. */
+  oneOff: boolean;
   onManage: () => void;
   query: string;
   onQuery: (q: string) => void;
@@ -186,7 +197,9 @@ function Library({
               className="flex min-h-12 items-center gap-2 self-start rounded-2xl border border-dashed border-brand/50 px-4 text-left font-bold text-brand hover:bg-brand-soft"
             >
               <Icon name="plus" size={18} strokeWidth={2.6} />
-              <span className="min-w-0 truncate">Create &ldquo;{query.trim()}&rdquo; as a new chore</span>
+              <span className="min-w-0 truncate">
+                {oneOff ? "Add" : "Create"} &ldquo;{query.trim()}&rdquo; as a {oneOff ? "one-off" : "new chore"}
+              </span>
             </button>
           )}
           {results.length === 0 && !canCreate && (
@@ -257,8 +270,21 @@ function Library({
   );
 }
 
-/** Docked at the bottom of step 1: type a name and continue. Duration, tax and the rest come next. */
-function NewChoreInput({ initial, onNext }: { initial: string; onNext: (title: string) => void }) {
+/**
+ * Docked at the bottom of step 1: choose One off or Repeat, type a name and continue. Duration, tax and the
+ * rest come next.
+ */
+function NewChoreInput({
+  initial,
+  mode,
+  onMode,
+  onNext,
+}: {
+  initial: string;
+  mode: Mode;
+  onMode: (m: Mode) => void;
+  onNext: (title: string) => void;
+}) {
   const [title, setTitle] = useState(initial);
 
   function submit(e: React.FormEvent) {
@@ -268,24 +294,40 @@ function NewChoreInput({ initial, onNext }: { initial: string; onNext: (title: s
   }
 
   return (
-    <form onSubmit={submit} className="flex gap-2">
-      <input
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-        maxLength={60}
-        placeholder="Add a new chore..."
-        aria-label="New chore name"
-        enterKeyHint="next"
-        className={fieldClass}
+    <form onSubmit={submit} className="flex flex-col gap-2">
+      <Segmented<Mode>
+        label="Kind of chore"
+        value={mode}
+        onChange={onMode}
+        options={[
+          { value: "one_off", label: "One off" },
+          { value: "repeat", label: "Repeat" },
+        ]}
       />
-      <button
-        type="submit"
-        disabled={!title.trim()}
-        aria-label="Continue with this new chore"
-        className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-brand text-brand-ink disabled:opacity-40"
-      >
-        <Icon name="chevron-right" size={24} strokeWidth={2.5} />
-      </button>
+      <p className="px-1 text-xs font-semibold text-muted" aria-live="polite">
+        {mode === "one_off"
+          ? "Calendar only. Not saved to your chore list."
+          : "Saved to your chore list to reuse or repeat."}
+      </p>
+      <div className="flex gap-2">
+        <input
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          maxLength={60}
+          placeholder={mode === "one_off" ? "Add a one-off chore..." : "Add a new chore..."}
+          aria-label="New chore name"
+          enterKeyHint="next"
+          className={fieldClass}
+        />
+        <button
+          type="submit"
+          disabled={!title.trim()}
+          aria-label="Continue with this new chore"
+          className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-brand text-brand-ink disabled:opacity-40"
+        >
+          <Icon name="chevron-right" size={24} strokeWidth={2.5} />
+        </button>
+      </div>
     </form>
   );
 }
@@ -317,22 +359,25 @@ function WhenWhoRepeat({
   const [category, setCategory] = useState("");
 
   const name = draft.kind === "library" ? draft.chore.title : draft.title;
+  const oneOff = draft.kind === "new" && draft.oneOff;
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!day) return;
-    const repeating = repeat !== "none";
+    const repeating = !oneOff && repeat !== "none";
     onClose();
     onAdded(day); // jump the calendar to that week straight away; the chore appears optimistically
     const run =
       draft.kind === "library"
         ? actions.scheduleChore(draft.chore, day, assignee, { repeat, minutes, tax, pricing, bounty })
-        : actions.createAndScheduleChore(
-            { title: draft.title, minutes, tax, pricing, bounty, category: resolveCategory(categories, category) },
-            day,
-            assignee,
-            repeat,
-          );
+        : draft.oneOff
+          ? actions.scheduleOneOff({ title: draft.title, minutes, tax, pricing, bounty }, day, assignee)
+          : actions.createAndScheduleChore(
+              { title: draft.title, minutes, tax, pricing, bounty, category: resolveCategory(categories, category) },
+              day,
+              assignee,
+              repeat,
+            );
     void run.then(
       (ok) =>
         ok &&
@@ -347,9 +392,10 @@ function WhenWhoRepeat({
     <form onSubmit={submit} className="flex flex-col gap-5">
       <div className="rounded-2xl bg-raised p-4">
         <p className="text-lg font-extrabold leading-snug">{name}</p>
+        {oneOff && <p className="mt-1 text-xs font-bold uppercase tracking-wide text-muted">One off</p>}
       </div>
 
-      {draft.kind === "new" && (
+      {draft.kind === "new" && !oneOff && (
         <div className="flex flex-col gap-1.5">
           <label htmlFor="add-category" className="text-sm font-extrabold">
             Category
@@ -379,30 +425,32 @@ function WhenWhoRepeat({
 
       <AssigneeField value={assignee} onChange={setAssignee} me={me} partner={partner} tone={tone} />
 
-      <div className="flex flex-col gap-1.5">
-        <label htmlFor="add-repeat" className="text-sm font-extrabold">
-          Repeat
-        </label>
-        <select
-          id="add-repeat"
-          value={repeat}
-          onChange={(e) => setRepeat(e.target.value as RepeatChoice)}
-          className={fieldClass}
-        >
-          {REPEAT_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
-        <p className="text-xs font-semibold text-muted" aria-live="polite">
-          {day ? describeRepeat(repeat, day) : ""}
-        </p>
-      </div>
+      {!oneOff && (
+        <div className="flex flex-col gap-1.5">
+          <label htmlFor="add-repeat" className="text-sm font-extrabold">
+            Repeat
+          </label>
+          <select
+            id="add-repeat"
+            value={repeat}
+            onChange={(e) => setRepeat(e.target.value as RepeatChoice)}
+            className={fieldClass}
+          >
+            {REPEAT_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs font-semibold text-muted" aria-live="polite">
+            {day ? describeRepeat(repeat, day) : ""}
+          </p>
+        </div>
+      )}
 
       <button type="submit" disabled={!day} className={`${primaryButton} min-h-14 text-lg`}>
         <Icon name="plus" strokeWidth={2.6} />
-        {repeat === "none" ? "Add chore" : "Add and repeat"}
+        {oneOff || repeat === "none" ? "Add chore" : "Add and repeat"}
       </button>
     </form>
   );

@@ -124,6 +124,13 @@ in order (`0004_…`) and should be additive; a migration runs against live data
   write `status` / `created_by` or edit a reward's title, description or cost, and `redeem_reward` only redeems approved
   rewards), so an out-of-date copy of the app cannot skip it. With nobody else in the household there is nobody to ask, so it is
   approved at once. Rewards that existed before this stay approved. Only adding needs a sign-off; retiring is free for either.
+- **One-off chores**: above the "Add a new chore..." box in the Add chore sheet, a **One off / Repeat** switch. **Repeat** (the
+  default) is how it always worked: a chore you type in is saved to your chore list, so it shows up again under Recent /
+  Common / All tasks and on the Manage tab, and can be set to repeat. **One off** puts the chore on the calendar for one day
+  only: it is never added to the chore list, has no category and does not offer a repeat, but it is otherwise an ordinary
+  chore (both partners see it, it pays points, it can be edited, moved, completed and deleted). It is stored as a calendar chore
+  with no link to the chore list (`chore_instances.chore_id` is null), so it needed no database change. Picking a chore that is
+  already in the list is unaffected. The Manage tab's "New chore" form has no switch, because everything there is a saved chore.
 - **"Profile switcher"** is a profile menu (members, invite code, sign out): each partner signs in on their own device, so
   there is nothing to switch between.
 - **Common tasks** are matched by title against the six base chores; **Recent** is the five most recently scheduled.

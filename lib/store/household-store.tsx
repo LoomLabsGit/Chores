@@ -251,6 +251,11 @@ export type Actions = {
   moveInstance: (id: string, patch: InstancePatch) => Promise<boolean>;
   scheduleChore: (chore: ChoreLibraryItem, date: string, assignedTo: string | null, opts?: ScheduleOptions) => Promise<boolean>;
   createAndScheduleChore: (chore: NewChore, date: string, assignedTo: string | null, repeat?: RepeatChoice) => Promise<boolean>;
+  /**
+   * A one-off: goes on the calendar for that day only. It is never added to the chore library (so it is not
+   * offered again under Recent / Common / All tasks or on the Manage tab) and it does not repeat.
+   */
+  scheduleOneOff: (chore: NewChore, date: string, assignedTo: string | null) => Promise<boolean>;
   /** Manage chores: add a chore to the library without putting it on the calendar. */
   createLibraryChore: (input: LibraryInput) => Promise<boolean>;
   /**
@@ -582,6 +587,51 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
         if (error || !data?.length) {
           dispatch({ type: "instance", row: prev });
           return fail(error ?? { message: "That chore can no longer be changed." });
+        }
+        return true;
+      },
+
+      async scheduleOneOff(input, date, assignedTo) {
+        const title = input.title.trim();
+        if (!title) return false;
+        const pricing = input.pricing ?? "time_based";
+        const id = uuid();
+        const row: ChoreInstance = {
+          id,
+          chore_id: null, // not linked to the library: this is what makes it a one-off
+          title,
+          household_id: householdIdNow(),
+          assigned_to: assignedTo,
+          scheduled_date: date,
+          is_completed: false,
+          completed_at: null,
+          is_recurring: false,
+          recurrence_rule: null,
+          parent_recurrence_id: null,
+          points_assigned: 5, // legacy column, unused
+          estimated_duration: input.minutes,
+          chore_tax: pricing === "fixed_bounty" ? 0 : input.tax,
+          pricing_type: pricing,
+          fixed_bounty_points: input.bounty ?? 15,
+        };
+        pendingInsertsRef.current.add(id);
+        dispatch({ type: "instance", row });
+        const { error } = await supabase.from("chore_instances").insert({
+          id,
+          chore_id: null,
+          title,
+          household_id: row.household_id,
+          assigned_to: assignedTo,
+          scheduled_date: date,
+          estimated_duration: row.estimated_duration,
+          chore_tax: row.chore_tax,
+          pricing_type: pricing,
+          fixed_bounty_points: row.fixed_bounty_points,
+        });
+        pendingInsertsRef.current.delete(id);
+        if (error) {
+          dispatch({ type: "instance-remove", id });
+          return fail(error);
         }
         return true;
       },

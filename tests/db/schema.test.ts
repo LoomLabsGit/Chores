@@ -2339,3 +2339,64 @@ describe("reward sign-off", () => {
     expect(await as(DREW, `select 1 from public.rewards where id = $1`, [r.id])).toHaveLength(0);
   });
 });
+
+describe.each([
+  ["the creator", ALEX, BLAKE],
+  ["the partner", BLAKE, ALEX],
+])("one-off chores, added by %s", (_who, me, other) => {
+  const libraryCount = async () =>
+    Number((await admin(`select count(*)::int as n from public.chore_library where household_id = (select household_id from public.profiles where id = $1)`, [me]))[0].n);
+  const balance = async (id: string) => Number((await admin(`select points from public.profiles where id = $1`, [id]))[0].points);
+  /** What the app inserts for a one-off: no chore_id, so it is not linked to the chore library. */
+  const oneOff = async (title: string, who: string | null, minutes = 30, tax = 10, extra = "") => {
+    const [row] = await as(
+      me,
+      `insert into public.chore_instances (chore_id, title, household_id, assigned_to, scheduled_date, estimated_duration, chore_tax ${extra ? ", pricing_type, fixed_bounty_points" : ""})
+       values (null, $1, public.current_household_id(), $2, current_date + 1, $3, $4 ${extra ? `, ${extra}` : ""}) returning id`,
+      [title, who, minutes, tax],
+    );
+    return row.id as string;
+  };
+
+  it("goes on the calendar for both partners without adding anything to the chore library", async () => {
+    const before = await libraryCount();
+    const id = await oneOff("Number the outdoor bins", me);
+    expect(await libraryCount()).toBe(before);
+    const seenByOther = await as(other, `select title, chore_id from public.chore_instances where id = $1`, [id]);
+    expect(seenByOther).toEqual([{ title: "Number the outdoor bins", chore_id: null }]);
+    expect(await as(DREW, `select 1 from public.chore_instances where id = $1`, [id])).toHaveLength(0);
+  });
+
+  it("pays the person it is for, exactly like any other chore", async () => {
+    const id = await oneOff("Clean the outdoor bins", me, 30, 10);
+    const before = await balance(me);
+    await as(me, `select * from public.complete_chore($1, 30, 100)`, [id]);
+    expect(await balance(me)).toBe(before + 6 + 10); // 30 minutes = 6 points, plus the 10 chore tax
+  });
+
+  it("credits the assignee, not whoever taps Complete, and can be a fixed bounty", async () => {
+    const id = await oneOff("Assemble the shed", other, 60, 0, "'fixed_bounty', 40");
+    const [mine, theirs] = [await balance(me), await balance(other)];
+    await as(me, `select * from public.complete_chore($1, 60, 100)`, [id]);
+    expect(await balance(me)).toBe(mine);
+    expect(await balance(other)).toBe(theirs + 40);
+  });
+
+  it("can be turned into a repeating chore later, and still never enters the library", async () => {
+    const before = await libraryCount();
+    const id = await oneOff("Water the plants", me, 10, 0);
+    await as(me, `select public.make_chore_recurring($1, 'weekly')`, [id]);
+    const rows = await admin(`select count(*)::int as n from public.chore_instances where title = 'Water the plants' and household_id = (select household_id from public.profiles where id = $1)`, [me]);
+    expect(rows[0].n).toBeGreaterThan(1);
+    expect(await libraryCount()).toBe(before);
+  });
+
+  it("is not touched when a library chore with the same name is edited", async () => {
+    const name = `Bins ${me.slice(-1)}`;
+    const [lib] = await as(me, `select * from public.create_library_chore($1, 'Outdoors', 10, 0)`, [name]);
+    const id = await oneOff(name, me, 45, 3);
+    await as(me, `select * from public.update_library_chore($1, $2, 'Outdoors', 20, 9)`, [lib.id, `${name} renamed`]);
+    const [row] = await admin(`select title, estimated_duration as minutes, chore_tax as tax from public.chore_instances where id = $1`, [id]);
+    expect(row).toEqual({ title: name, minutes: 45, tax: 3 });
+  });
+});
