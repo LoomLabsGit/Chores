@@ -108,11 +108,16 @@ function Card({ title, subtitle, children }: { title: string; subtitle?: string;
   );
 }
 
+/** Categories beyond this are tucked behind "Show all" in the split card. */
+const SPLIT_SHOWN = 3;
+
 function Charts({ stats, caption }: { stats: StatsResult; caption: string }) {
   const { state, tone } = useHousehold();
   const members = state.members.map((m) => ({ id: m.id, name: m.display_name, tone: tone(m.id) }));
   const memberIds = members.map((m) => m.id);
   const catMax = Math.max(1, ...stats.categories.map((c) => c.minutes));
+  const [showAllCategories, setShowAllCategories] = useState(false);
+  const shownCategories = showAllCategories ? stats.categories : stats.categories.slice(0, SPLIT_SHOWN);
 
   return (
     <div className="grid gap-4 lg:grid-cols-2">
@@ -195,7 +200,7 @@ function Charts({ stats, caption }: { stats: StatsResult; caption: string }) {
               ))}
             </ul>
             <div className="flex flex-col gap-4">
-              {stats.categories.map((c) => {
+              {shownCategories.map((c) => {
                 const pct = splitPercents(c.perUser, memberIds);
                 const segments = members.map((m) => ({
                   key: m.id,
@@ -203,9 +208,17 @@ function Charts({ stats, caption }: { stats: StatsResult; caption: string }) {
                   pct: pct?.[m.id] ?? 0,
                   barClassName: TONE_BAR[m.tone],
                 }));
-                return <CategorySplitRow key={c.category} label={c.category} total={c.minutes} max={catMax} segments={segments} />;
+                return <CategorySplitRow key={c.category} label={c.category} total={c.minutes} segments={segments} />;
               })}
             </div>
+            {stats.categories.length > SPLIT_SHOWN && (
+              <button
+                onClick={() => setShowAllCategories((v) => !v)}
+                className="mt-3 min-h-11 self-start rounded-full px-3 text-sm font-bold text-brand hover:bg-brand-soft"
+              >
+                {showAllCategories ? "Show fewer" : `Show all ${stats.categories.length}`}
+              </button>
+            )}
           </>
         )}
       </Card>
@@ -261,15 +274,12 @@ function HBar({ label, value, max, text, className }: { label: string; value: nu
 function CategorySplitRow({
   label,
   total,
-  max,
   segments,
 }: {
   label: string;
   total: number;
-  max: number;
   segments: { key: string; value: number; pct: number; barClassName: string }[];
 }) {
-  const width = Math.min(100, Math.max(total > 0 ? 1.5 : 0, (total / max) * 100));
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex items-baseline justify-between gap-3">
@@ -283,7 +293,9 @@ function CategorySplitRow({
           </span>
         ))}
       </div>
-      <div className="flex h-3.5 gap-0.5" style={{ width: `${width}%` }}>
+      {/* Every row's bar fills the full width: it encodes only the split within this category, not
+          this category's weight against the others (the header's total already carries that). */}
+      <div className="flex h-3.5 gap-0.5">
         {segments
           .filter((s) => s.value > 0)
           .map((s, i, visible) => (
