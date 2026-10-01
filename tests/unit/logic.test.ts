@@ -375,7 +375,7 @@ describe("stats", () => {
     expect(r.completionCount).toBe(1);
   });
 
-  it("groups minutes by category (General fallback) sorted high to low", () => {
+  it("groups minutes by category (General fallback) sorted high to low, with each partner's share", () => {
     const r = computeStats({
       ...base,
       instances: [
@@ -384,17 +384,29 @@ describe("stats", () => {
         { id: "i3", chore_id: null, scheduled_date: "2026-09-18", completed_at: at("2026-09-18") },
       ],
       completions: [
-        completion({ instance_id: "i1", total_duration_minutes: 45 }),
-        completion({ instance_id: "i2", total_duration_minutes: 10 }),
-        completion({ instance_id: "i3", total_duration_minutes: 20 }),
-        completion({ instance_id: "i1", total_duration_minutes: 15 }),
+        completion({ instance_id: "i1", total_duration_minutes: 45, user_a_duration: 30, user_b_duration: 15 }),
+        completion({ instance_id: "i2", total_duration_minutes: 10, user_a_duration: 10, user_b_duration: 0 }),
+        completion({ instance_id: "i3", total_duration_minutes: 20, user_a_duration: 20, user_b_duration: 0 }),
+        completion({ instance_id: "i1", total_duration_minutes: 15, user_a_duration: 0, user_b_duration: 15 }),
       ],
     });
     expect(r.categories).toEqual([
-      { category: "Kitchen", minutes: 60 },
-      { category: "General", minutes: 20 },
-      { category: "Garden", minutes: 10 },
+      { category: "Kitchen", minutes: 60, perUser: { [A]: 30, [B]: 30 } },
+      { category: "General", minutes: 20, perUser: { [A]: 20, [B]: 0 } },
+      { category: "Garden", minutes: 10, perUser: { [A]: 10, [B]: 0 } },
     ]);
+  });
+
+  it("a solo household's duplicate user id does not double-count a category's minutes", () => {
+    const r = computeStats({
+      ...base,
+      memberIds: [A],
+      instances: [{ id: "i1", chore_id: "kitchen", scheduled_date: "2026-09-18", completed_at: at("2026-09-18") }],
+      completions: [
+        completion({ instance_id: "i1", total_duration_minutes: 30, user_a_id: A, user_a_duration: 30, user_b_id: A, user_b_duration: 0 }),
+      ],
+    });
+    expect(r.categories).toEqual([{ category: "Kitchen", minutes: 30, perUser: { [A]: 30 } }]);
   });
 
   it("scores consistency: done on or before the scheduled day is on time", () => {

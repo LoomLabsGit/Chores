@@ -53,7 +53,7 @@ export type StatsResult = {
   totalMinutes: number;
   /** Whole-number percentage of logged minutes per member; null when nothing is logged. */
   split: Record<string, number> | null;
-  categories: { category: string; minutes: number }[];
+  categories: { category: string; minutes: number; perUser: Record<string, number> }[];
   consistency: { onTime: number; delayed: number; onTimePct: number | null };
   completionCount: number;
 };
@@ -68,6 +68,14 @@ export function computeStats(input: StatsInput): StatsResult {
   const instanceById = new Map(input.instances.map((i) => [i.id, i]));
   const categoryByChore = new Map(input.library.map((c) => [c.id, c.category || "General"]));
   const categoryMinutes = new Map<string, number>();
+  // Per-category, per-member minutes, so "time by category" can show each partner's share of every bar.
+  const categoryUserMinutes = new Map<string, Record<string, number>>();
+  const addCategoryUserMinutes = (category: string, userId: string, minutes: number) => {
+    if (!minutes || !(userId in perUser)) return;
+    const row = categoryUserMinutes.get(category) ?? Object.fromEntries(memberIds.map((id) => [id, 0]));
+    row[userId] = (row[userId] ?? 0) + minutes;
+    categoryUserMinutes.set(category, row);
+  };
   let onTime = 0;
   let delayed = 0;
   let completionCount = 0;
@@ -92,6 +100,8 @@ export function computeStats(input: StatsInput): StatsResult {
     const inst = c.instance_id ? instanceById.get(c.instance_id) : undefined;
     const category = (inst?.chore_id && categoryByChore.get(inst.chore_id)) || "General";
     categoryMinutes.set(category, (categoryMinutes.get(category) ?? 0) + c.total_duration_minutes);
+    addCategoryUserMinutes(category, c.user_a_id, c.user_a_duration);
+    addCategoryUserMinutes(category, c.user_b_id, c.user_b_duration);
 
     if (inst?.completed_at) {
       if (isoOfTimestamp(inst.completed_at) <= inst.scheduled_date) onTime += 1;
@@ -131,7 +141,11 @@ export function computeStats(input: StatsInput): StatsResult {
   }
 
   const categories = [...categoryMinutes.entries()]
-    .map(([category, minutes]) => ({ category, minutes }))
+    .map(([category, minutes]) => ({
+      category,
+      minutes,
+      perUser: categoryUserMinutes.get(category) ?? Object.fromEntries(memberIds.map((id) => [id, 0])),
+    }))
     .filter((c) => c.minutes > 0)
     .sort((x, y) => y.minutes - x.minutes || x.category.localeCompare(y.category));
 
