@@ -194,32 +194,16 @@ function Charts({ stats, caption }: { stats: StatsResult; caption: string }) {
                 </li>
               ))}
             </ul>
-            <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-4">
               {stats.categories.map((c) => {
                 const pct = splitPercents(c.perUser, memberIds);
-                const segments = members
-                  .map((m) => ({
-                    key: m.id,
-                    name: m.name,
-                    value: c.perUser[m.id] ?? 0,
-                    pct: pct?.[m.id] ?? 0,
-                    barClassName: TONE_BAR[m.tone],
-                  }))
-                  .filter((s) => s.value > 0);
-                // The headline is whoever did more of this one — never both, and never when it's a
-                // tie or there is only one person in the household (nothing to compare against).
-                const [first, second] = [...segments].sort((a, b) => b.value - a.value);
-                const dominant = members.length > 1 && first && first.value !== second?.value ? first : null;
-                return (
-                  <CategorySplitRow
-                    key={c.category}
-                    label={c.category}
-                    total={c.minutes}
-                    max={catMax}
-                    segments={segments}
-                    dominant={dominant}
-                  />
-                );
+                const segments = members.map((m) => ({
+                  key: m.id,
+                  value: c.perUser[m.id] ?? 0,
+                  pct: pct?.[m.id] ?? 0,
+                  barClassName: TONE_BAR[m.tone],
+                }));
+                return <CategorySplitRow key={c.category} label={c.category} total={c.minutes} max={catMax} segments={segments} />;
               })}
             </div>
           </>
@@ -267,55 +251,48 @@ function HBar({ label, value, max, text, className }: { label: string; value: nu
 }
 
 /**
- * One category of "Time split by category": a header line (category + total, so the total is read
- * once per category rather than requiring a trip back to "Where the time goes"), then the split bar
- * with a single label — whoever did more of it — at its tip. Never both percentages and never the
- * absolute minutes inline: that's one number telling the one story this row is about, not a flood of
- * them. Identity on that label comes from a small dot, not from colouring the number itself, so the
- * text itself stays plain and legible. The full breakdown (both people, exact minutes) is still a
- * hover/long-press away via the row's title.
+ * One category of "Time split by category": a header line (category + total), each partner's exact
+ * share (percentage and minutes, in their position — first member's column on the left, last
+ * member's on the right, matching the legend above), then the split bar in the same left-to-right
+ * order. The numbers stay in plain ink rather than the partner's colour — the bar segment beside
+ * them is what carries identity — and a zero share still prints ("0%") rather than disappearing, so
+ * every row says the same kind of thing.
  */
 function CategorySplitRow({
   label,
   total,
   max,
   segments,
-  dominant,
 }: {
   label: string;
   total: number;
   max: number;
-  segments: { key: string; name: string; value: number; pct: number; barClassName: string }[];
-  dominant: { name: string; pct: number; barClassName: string } | null;
+  segments: { key: string; value: number; pct: number; barClassName: string }[];
 }) {
   const width = Math.min(100, Math.max(total > 0 ? 1.5 : 0, (total / max) * 100));
-  const title = `${label}: ${segments.map((s) => `${s.name} ${s.pct}% (${formatMinutes(s.value)})`).join(", ")}`;
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex items-baseline justify-between gap-3">
         <span className="truncate text-sm font-extrabold">{label}</span>
         <span className="text-sm font-extrabold tabular-nums">{formatMinutes(total)}</span>
       </div>
-      {/* The label column is a fixed width, present or not, so the bar's percentage always scales
-          against the same track — a row with no label can't end up reading longer than one that has it. */}
-      <div className="grid grid-cols-[1fr_3.5rem] items-center gap-2" title={title}>
-        <div className="flex h-3.5 gap-0.5" style={{ width: `${width}%` }}>
-          {segments.map((s, i) => (
+      <div className="flex items-baseline justify-between gap-3">
+        {segments.map((s) => (
+          <span key={s.key} className="whitespace-nowrap text-sm font-extrabold tabular-nums">
+            {s.pct}% <span className="font-bold text-muted">({formatMinutes(s.value)})</span>
+          </span>
+        ))}
+      </div>
+      <div className="flex h-3.5 gap-0.5" style={{ width: `${width}%` }}>
+        {segments
+          .filter((s) => s.value > 0)
+          .map((s, i, visible) => (
             <div
               key={s.key}
               style={{ flexGrow: s.value, flexBasis: 0 }}
-              className={`min-w-1 ${s.barClassName} ${i === segments.length - 1 ? "rounded-r-[4px]" : ""}`}
+              className={`min-w-1 ${s.barClassName} ${i === visible.length - 1 ? "rounded-r-[4px]" : ""}`}
             />
           ))}
-        </div>
-        <span className="flex items-center justify-end gap-1.5 whitespace-nowrap text-sm font-bold text-muted">
-          {dominant && (
-            <>
-              <span className={`h-2 w-2 rounded-full ${dominant.barClassName}`} aria-hidden />
-              {dominant.pct}%
-            </>
-          )}
-        </span>
       </div>
     </div>
   );
