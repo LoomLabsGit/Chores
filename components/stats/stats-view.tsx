@@ -190,16 +190,21 @@ function Charts({ stats, caption }: { stats: StatsResult; caption: string }) {
           <p className="text-sm text-muted">No time logged in this period.</p>
         ) : (
           <>
-            {/* The key (colour + name) is stated once here, not on every row below. */}
-            <ul className="mb-3 flex flex-wrap gap-x-6 gap-y-2">
-              {members.map((m) => (
-                <li key={m.id} className="flex items-center gap-2 text-sm">
+            {/* The key (colour + name) is stated once here, not on every row below. The last member
+                docks to the far right (name before dot) so the two keys read as the two ends of
+                every bar below, the same way the bars themselves run edge to edge. */}
+            <ul className="mb-3 flex items-center justify-between gap-3">
+              {members.map((m, i) => (
+                <li
+                  key={m.id}
+                  className={`flex items-center gap-2 text-sm font-bold ${i > 0 ? "flex-row-reverse" : ""}`}
+                >
                   <span className={`h-2.5 w-2.5 rounded-full ${TONE_BAR[m.tone]}`} aria-hidden />
-                  <span className="font-bold">{m.name}</span>
+                  {m.name}
                 </li>
               ))}
             </ul>
-            <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-7">
               {shownCategories.map((c) => {
                 const pct = splitPercents(c.perUser, memberIds);
                 const segments = members.map((m) => ({
@@ -264,12 +269,12 @@ function HBar({ label, value, max, text, className }: { label: string; value: nu
 }
 
 /**
- * One category of "Time split by category": a header line (category + total), each partner's exact
- * share (percentage and minutes, in their position — first member's column on the left, last
- * member's on the right, matching the legend above), then the split bar in the same left-to-right
- * order. The numbers stay in plain ink rather than the partner's colour — the bar segment beside
- * them is what carries identity — and a zero share still prints ("0%") rather than disappearing, so
- * every row says the same kind of thing.
+ * One category of "Time split by category": a header line (category + total), the split bar, then
+ * each partner's exact share underneath it (percentage bold, exact minutes beside it in regular
+ * weight) — first member's column on the left, last member's on the right, matching the legend and
+ * the bar above. The numbers stay in plain ink rather than the partner's colour — the bar segment is
+ * what carries identity — and a zero share still prints ("0%") rather than disappearing, so every
+ * row says the same kind of thing.
  */
 function CategorySplitRow({
   label,
@@ -281,17 +286,10 @@ function CategorySplitRow({
   segments: { key: string; value: number; pct: number; barClassName: string }[];
 }) {
   return (
-    <div className="flex flex-col gap-1.5">
+    <div className="flex flex-col gap-2">
       <div className="flex items-baseline justify-between gap-3">
         <span className="truncate text-sm font-extrabold">{label}</span>
         <span className="text-sm font-extrabold tabular-nums">{formatMinutes(total)}</span>
-      </div>
-      <div className="flex items-baseline justify-between gap-3">
-        {segments.map((s) => (
-          <span key={s.key} className="whitespace-nowrap text-sm font-extrabold tabular-nums">
-            {s.pct}% <span className="font-bold text-muted">({formatMinutes(s.value)})</span>
-          </span>
-        ))}
       </div>
       {/* Every row's bar fills the full width: it encodes only the split within this category, not
           this category's weight against the others (the header's total already carries that). */}
@@ -305,6 +303,13 @@ function CategorySplitRow({
               className={`min-w-1 ${s.barClassName} ${i === visible.length - 1 ? "rounded-r-[4px]" : ""}`}
             />
           ))}
+      </div>
+      <div className="flex items-baseline justify-between gap-3">
+        {segments.map((s) => (
+          <span key={s.key} className="whitespace-nowrap text-sm tabular-nums">
+            <span className="font-extrabold">{s.pct}%</span> <span className="font-normal text-muted">({formatMinutes(s.value)})</span>
+          </span>
+        ))}
       </div>
     </div>
   );
