@@ -6,6 +6,7 @@ import { formatMinutes } from "@/lib/logic/split";
 import {
   computeStats,
   DEFAULT_TIMEFRAME,
+  splitPercents,
   TIMEFRAMES,
   timeframeStart,
   type StatsResult,
@@ -13,7 +14,7 @@ import {
 } from "@/lib/logic/stats";
 import { useHousehold, type StatsData } from "@/lib/store/household-store";
 import { Icon } from "../icons";
-import { EmptyState, TONE_BAR } from "../ui/controls";
+import { EmptyState, TONE_BAR, TONE_TEXT } from "../ui/controls";
 
 export function StatsView() {
   const { state, actions } = useHousehold();
@@ -110,6 +111,7 @@ function Card({ title, subtitle, children }: { title: string; subtitle?: string;
 function Charts({ stats, caption }: { stats: StatsResult; caption: string }) {
   const { state, tone } = useHousehold();
   const members = state.members.map((m) => ({ id: m.id, name: m.display_name, tone: tone(m.id) }));
+  const memberIds = members.map((m) => m.id);
   const catMax = Math.max(1, ...stats.categories.map((c) => c.minutes));
 
   return (
@@ -193,18 +195,27 @@ function Charts({ stats, caption }: { stats: StatsResult; caption: string }) {
               ))}
             </ul>
             <div className="flex flex-col gap-1">
-              {stats.categories.map((c) => (
-                <CategorySplitRow
-                  key={c.category}
-                  label={c.category}
-                  total={c.minutes}
-                  max={catMax}
-                  text={formatMinutes(c.minutes)}
-                  segments={members
-                    .map((m) => ({ key: m.id, value: c.perUser[m.id] ?? 0, className: TONE_BAR[m.tone] }))
-                    .filter((s) => s.value > 0)}
-                />
-              ))}
+              {stats.categories.map((c) => {
+                const pct = splitPercents(c.perUser, memberIds);
+                return (
+                  <CategorySplitRow
+                    key={c.category}
+                    label={c.category}
+                    total={c.minutes}
+                    max={catMax}
+                    segments={members
+                      .map((m) => ({
+                        key: m.id,
+                        name: m.name,
+                        value: c.perUser[m.id] ?? 0,
+                        pct: pct?.[m.id] ?? 0,
+                        barClassName: TONE_BAR[m.tone],
+                        textClassName: TONE_TEXT[m.tone],
+                      }))
+                      .filter((s) => s.value > 0)}
+                  />
+                );
+              })}
             </div>
           </>
         )}
@@ -253,36 +264,45 @@ function HBar({ label, value, max, text, className }: { label: string; value: nu
 /**
  * One row of "Time split by category": an {@link HBar}-width bar (so rows stay as dense as "Where the
  * time goes"), but made of per-partner segments like {@link StackedBar} — the colour key lives once in
- * the card above, so each row carries no label of its own beyond the category name.
+ * the card above, so each row carries no label of its own beyond the category name. The trailing figure
+ * is each partner's percentage of *this* category (colour-matched to their segment), not the total time —
+ * the total is already on "Where the time goes" one card up, so repeating it here would say nothing new.
+ * The exact minutes are still one hover/long-press away, in the row's title.
  */
 function CategorySplitRow({
   label,
   total,
   max,
-  text,
   segments,
 }: {
   label: string;
   total: number;
   max: number;
-  text: string;
-  segments: { key: string; value: number; className: string }[];
+  segments: { key: string; name: string; value: number; pct: number; barClassName: string; textClassName: string }[];
 }) {
   const width = Math.max(total > 0 ? 1.5 : 0, (total / max) * 68);
+  const title = `${label}: ${segments.map((s) => `${s.name} ${s.pct}% (${formatMinutes(s.value)})`).join(", ")}`;
   return (
     <div className="grid min-h-9 grid-cols-[5.5rem_1fr] items-center gap-3">
       <span className="truncate text-sm font-bold text-muted">{label}</span>
-      <div className="flex items-center gap-2" title={`${label}: ${text}`}>
+      <div className="flex items-center gap-2" title={title}>
         <div className="flex h-3.5 gap-0.5" style={{ width: `${width}%` }}>
           {segments.map((s, i) => (
             <div
               key={s.key}
               style={{ flexGrow: s.value, flexBasis: 0 }}
-              className={`min-w-1 ${s.className} ${i === segments.length - 1 ? "rounded-r-[4px]" : ""}`}
+              className={`min-w-1 ${s.barClassName} ${i === segments.length - 1 ? "rounded-r-[4px]" : ""}`}
             />
           ))}
         </div>
-        <span className="whitespace-nowrap text-sm font-extrabold tabular-nums">{text}</span>
+        <span className="whitespace-nowrap text-sm font-extrabold tabular-nums">
+          {segments.map((s, i) => (
+            <span key={s.key} className={s.textClassName}>
+              {i > 0 && <span className="text-muted">&nbsp;·&nbsp;</span>}
+              {s.pct}%
+            </span>
+          ))}
+        </span>
       </div>
     </div>
   );

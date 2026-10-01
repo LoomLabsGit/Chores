@@ -46,7 +46,7 @@ import {
   snapMinutes,
 } from "@/lib/logic/points";
 import { formatMinutes } from "@/lib/logic/split";
-import { computeStats, timeframeStart } from "@/lib/logic/stats";
+import { computeStats, splitPercents, timeframeStart } from "@/lib/logic/stats";
 import type {
   AppNotification,
   Challenge,
@@ -395,6 +395,18 @@ describe("stats", () => {
       { category: "General", minutes: 20, perUser: { [A]: 20, [B]: 0 } },
       { category: "Garden", minutes: 10, perUser: { [A]: 10, [B]: 0 } },
     ]);
+  });
+
+  it("splitPercents: rounds to whole numbers that always sum to exactly 100", () => {
+    expect(splitPercents({ [A]: 18, [B]: 12 }, [A, B])).toEqual({ [A]: 60, [B]: 40 });
+    // 1/3 and 2/3 rounds to 33 and 67, not 33/33 or 34/67 — the last member absorbs the remainder.
+    expect(splitPercents({ [A]: 1, [B]: 2 }, [A, B])).toEqual({ [A]: 33, [B]: 67 });
+  });
+
+  it("splitPercents: null with nothing logged; a member missing from the map counts as zero", () => {
+    expect(splitPercents({}, [A, B])).toBeNull();
+    expect(splitPercents({ [A]: 0, [B]: 0 }, [A, B])).toBeNull();
+    expect(splitPercents({ [A]: 10 }, [A, B])).toEqual({ [A]: 100, [B]: 0 });
   });
 
   it("a solo household's duplicate user id does not double-count a category's minutes", () => {

@@ -27,6 +27,23 @@ export function timeframeStart(tf: Timeframe, today: string): string {
   return addDays(today, -(days - 1));
 }
 
+/**
+ * Whole-number percentage of `minutesByMember` held by each member, always summing to exactly 100
+ * (the last member takes the rounding remainder). Null when nobody has logged anything.
+ */
+export function splitPercents(minutesByMember: Record<string, number>, memberIds: string[]): Record<string, number> | null {
+  const total = memberIds.reduce((sum, id) => sum + (minutesByMember[id] ?? 0), 0);
+  if (total <= 0) return null;
+  const result: Record<string, number> = {};
+  let assigned = 0;
+  memberIds.forEach((id, i) => {
+    const pct = i === memberIds.length - 1 ? 100 - assigned : Math.round(((minutesByMember[id] ?? 0) / total) * 100);
+    result[id] = pct;
+    assigned += pct;
+  });
+  return result;
+}
+
 export type StatsInstance = Pick<ChoreInstance, "id" | "chore_id" | "scheduled_date" | "completed_at">;
 
 export type StatsInput = {
@@ -128,17 +145,10 @@ export function computeStats(input: StatsInput): StatsResult {
   for (const u of Object.values(perUser)) u.earned = u.chorePoints + u.challengePoints;
 
   const totalMinutes = memberIds.reduce((sum, id) => sum + perUser[id].minutes, 0);
-  let split: StatsResult["split"] = null;
-  if (totalMinutes > 0) {
-    split = {};
-    let assigned = 0;
-    memberIds.forEach((id, i) => {
-      // Last member takes the remainder so the pair always sums to exactly 100.
-      const pct = i === memberIds.length - 1 ? 100 - assigned : Math.round((perUser[id].minutes / totalMinutes) * 100);
-      split![id] = pct;
-      assigned += pct;
-    });
-  }
+  const split = splitPercents(
+    Object.fromEntries(memberIds.map((id) => [id, perUser[id].minutes])),
+    memberIds,
+  );
 
   const categories = [...categoryMinutes.entries()]
     .map(([category, minutes]) => ({
