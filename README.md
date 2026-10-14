@@ -6,7 +6,7 @@ Next.js (App Router) + Tailwind on Vercel, Supabase for Postgres, Auth and Realt
 ## Setup
 
 1. **Supabase project.** Create one, then apply the schema: paste each file in `supabase/migrations/` into the SQL editor,
-   **in order** (`0001_init.sql` … `0015_reward_signoff.sql`), or use `supabase link` + `supabase db push`.
+   **in order** (`0001_init.sql` … `0016_backlog.sql`), or use `supabase link` + `supabase db push`.
    After the first setup, new migration files are applied for you (see below).
 2. **Auth.** Email + password. If "Confirm email" is on, add `https://YOUR-DOMAIN/auth/callback` (and
    `http://localhost:3000/auth/callback`) under Authentication → URL Configuration.
@@ -69,7 +69,7 @@ in order (`0004_…`) and should be additive; a migration runs against live data
   it straight away (completing claims it for you at 100% by default).
 - **Points go to the chore's assignee** (migration 0007), whoever taps Complete, and completing never changes the assignee. An
   unassigned chore is claimed by whoever completes it. In a split, the first share belongs to the assignee.
-- **Manage chores** (`/manage`, migration 0008) is the library as a small CMS: create, edit and delete the chores you can
+- **Manage chores** (`/manage`, migration 0008; reached from the profile menu, top left) is the library as a small CMS: create, edit and delete the chores you can
   schedule, with search, category filter and usage counts. Editing pushes only the fields you changed to what is already
   planned: a new **name** reaches every copy (finished ones too) and every repeating chore; a new **time or tax** reaches
   unfinished copies and repeating chores (so later days follow); **category** stays in the library. Finished chores never have
@@ -131,6 +131,17 @@ in order (`0004_…`) and should be additive; a migration runs against live data
   chore (both partners see it, it pays points, it can be edited, moved, completed and deleted). It is stored as a calendar chore
   with no link to the chore list (`chore_instances.chore_id` is null), so it needed no database change. Picking a chore that is
   already in the list is unaffected. The Manage tab's "New chore" form has no switch, because everything there is a saved chore.
+- **Backlog** (`/backlog`, migration 0016; it took the bottom bar's old "Manage" slot) is a shared list of jobs that need
+  doing, for a free hour or a productive day. A job has a title, a priority (High / Medium / Low), an optional person it is for
+  and the same time / chore tax / fixed-bounty pricing as any chore, tucked behind a "Time & points" row so logging one stays
+  quick. The list is grouped by priority, highest first, and within a band the job that has waited longest comes first so an old
+  job is never buried. It filters by search, priority and who it is for (anyone / mine / your partner's / unassigned). Giving a
+  job to your partner tells them. **Schedule** (or picking the job while adding a chore: it is offered under "From the
+  backlog" and found by search) opens the usual when / who step and puts it on the calendar as an ordinary **one-off chore**
+  carrying the job's time and points, and the job leaves the backlog. That is one database function
+  (`schedule_backlog_item`) that adds the chore and removes the job in a single step, so two partners planning the same job at
+  once get one chore and the second sees "no longer in the backlog". Backlog jobs are not library chores and never appear under
+  Manage chores; they have no category (a planned job counts as "General" in Stats, like any one-off).
 - **"Profile switcher"** is a profile menu (members, invite code, sign out): each partner signs in on their own device, so
   there is nothing to switch between.
 - **Common tasks** are matched by title against the six base chores; **Recent** is the five most recently scheduled.

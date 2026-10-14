@@ -171,6 +171,7 @@ export function AssigneeField({
   tone,
   label = "Assigned to",
   allowUnassigned = true,
+  unassignedHint = "Anyone can claim it from the calendar, or just complete it.",
 }: {
   value: string | null;
   onChange: (id: string | null) => void;
@@ -180,6 +181,8 @@ export function AssigneeField({
   label?: string;
   /** A finished chore always belongs to someone, so its editor turns this off. */
   allowUnassigned?: boolean;
+  /** What leaving it unassigned means here (shown while it is). */
+  unassignedHint?: string;
 }) {
   const people = partner ? [me, partner] : [me];
   return (
@@ -202,9 +205,7 @@ export function AssigneeField({
           ...(allowUnassigned ? [{ value: "", label: <>Unassigned</> }] : []),
         ]}
       />
-      {value === null && (
-        <p className="text-xs font-semibold text-muted">Anyone can claim it from the calendar, or just complete it.</p>
-      )}
+      {value === null && <p className="text-xs font-semibold text-muted">{unassignedHint}</p>}
     </div>
   );
 }

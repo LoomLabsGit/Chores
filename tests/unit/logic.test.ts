@@ -47,6 +47,17 @@ import {
 } from "@/lib/logic/points";
 import { formatMinutes } from "@/lib/logic/split";
 import { computeStats, splitPercents, timeframeStart } from "@/lib/logic/stats";
+import {
+  backlogForPicker,
+  describeCount,
+  filterBacklog,
+  groupByPriority,
+  isFiltering,
+  NO_FILTER,
+  priorityLabel,
+  sortBacklog,
+} from "@/lib/logic/backlog";
+import type { BacklogItem } from "@/lib/types";
 import type {
   AppNotification,
   Challenge,
@@ -839,5 +850,118 @@ describe("reward sign-off", () => {
     expect(badgeCount([note({ reference_id: "r1", is_read: true })], [], "me", [r])).toBe(1); // read, but still owed an answer
     expect(badgeCount([], [], "me", [reward({ id: "r2", status: "approved" })])).toBe(0);
     expect(badgeCount([], [], "me", [reward({ id: "r3", status: "pending", created_by: "me" })])).toBe(0); // my own is not mine to answer
+  });
+});
+
+describe("backlog", () => {
+  const ME = "me";
+  const PARTNER = "partner";
+  let n = 0;
+  const job = (over: Partial<BacklogItem> = {}): BacklogItem => ({
+    id: `job-${++n}`,
+    household_id: "hh",
+    title: `Job ${n}`,
+    priority: 2,
+    assigned_to: null,
+    estimated_duration: 15,
+    chore_tax: 0,
+    pricing_type: "time_based",
+    fixed_bounty_points: 15,
+    created_by: ME,
+    created_at: new Date(2026, 9, 1, 12, n).toISOString(),
+    ...over,
+  });
+  const titles = (items: BacklogItem[]) => items.map((i) => i.title);
+
+  it("puts the highest priority first, and within a priority the job that has waited longest", () => {
+    const lowOld = job({ title: "low old", priority: 1, created_at: "2026-09-01T10:00:00Z" });
+    const highNew = job({ title: "high new", priority: 3, created_at: "2026-10-09T10:00:00Z" });
+    const highOld = job({ title: "high old", priority: 3, created_at: "2026-09-05T10:00:00Z" });
+    const med = job({ title: "med", priority: 2, created_at: "2026-09-02T10:00:00Z" });
+    expect(titles(sortBacklog([lowOld, highNew, med, highOld]))).toEqual(["high old", "high new", "med", "low old"]);
+  });
+
+  it("does not change the list it is given, and breaks exact ties the same way every time", () => {
+    const at = "2026-10-01T10:00:00Z";
+    const a = job({ id: "a", title: "a", created_at: at });
+    const b = job({ id: "b", title: "b", created_at: at });
+    const input = [b, a];
+    expect(titles(sortBacklog(input))).toEqual(["a", "b"]);
+    expect(titles(input)).toEqual(["b", "a"]);
+  });
+
+  it("filters by priority", () => {
+    const items = [job({ title: "h", priority: 3 }), job({ title: "m", priority: 2 }), job({ title: "l", priority: 1 })];
+    expect(titles(filterBacklog(items, { ...NO_FILTER, priority: 3 }, ME))).toEqual(["h"]);
+    expect(titles(filterBacklog(items, { ...NO_FILTER, priority: 1 }, ME))).toEqual(["l"]);
+    expect(titles(filterBacklog(items, NO_FILTER, ME))).toEqual(["h", "m", "l"]);
+  });
+
+  it("filters by who it is for: mine, my partner's, or nobody's", () => {
+    const items = [
+      job({ title: "mine", assigned_to: ME }),
+      job({ title: "theirs", assigned_to: PARTNER }),
+      job({ title: "open", assigned_to: null }),
+    ];
+    expect(titles(filterBacklog(items, { ...NO_FILTER, who: "mine" }, ME))).toEqual(["mine"]);
+    expect(titles(filterBacklog(items, { ...NO_FILTER, who: "partner" }, ME))).toEqual(["theirs"]);
+    expect(titles(filterBacklog(items, { ...NO_FILTER, who: "open" }, ME))).toEqual(["open"]);
+    // The same list read by the other person flips mine / theirs.
+    expect(titles(filterBacklog(items, { ...NO_FILTER, who: "mine" }, PARTNER))).toEqual(["theirs"]);
+    expect(titles(filterBacklog(items, { ...NO_FILTER, who: "partner" }, PARTNER))).toEqual(["mine"]);
+  });
+
+  it("searches titles ignoring case and stray spaces, and combines with the other filters", () => {
+    const items = [
+      job({ title: "Clear the Gutters", priority: 3, assigned_to: ME }),
+      job({ title: "Clean the oven", priority: 1, assigned_to: PARTNER }),
+      job({ title: "Fix gutter bracket", priority: 3, assigned_to: PARTNER }),
+    ];
+    expect(titles(filterBacklog(items, { ...NO_FILTER, query: "  GUTTER " }, ME))).toEqual(["Clear the Gutters", "Fix gutter bracket"]);
+    expect(titles(filterBacklog(items, { query: "gutter", priority: 3, who: "partner" }, ME))).toEqual(["Fix gutter bracket"]);
+    expect(filterBacklog(items, { ...NO_FILTER, query: "shed" }, ME)).toEqual([]);
+  });
+
+  it("knows when a filter is on", () => {
+    expect(isFiltering(NO_FILTER)).toBe(false);
+    expect(isFiltering({ ...NO_FILTER, query: "   " })).toBe(false);
+    expect(isFiltering({ ...NO_FILTER, query: "x" })).toBe(true);
+    expect(isFiltering({ ...NO_FILTER, priority: 1 })).toBe(true);
+    expect(isFiltering({ ...NO_FILTER, who: "open" })).toBe(true);
+  });
+
+  it("groups into priority bands, highest first, leaving out empty ones", () => {
+    const sorted = sortBacklog([job({ title: "l", priority: 1 }), job({ title: "h1", priority: 3 }), job({ title: "h2", priority: 3 })]);
+    const groups = groupByPriority(sorted);
+    expect(groups.map((g) => g.priority)).toEqual([3, 1]);
+    expect(titles(groups[0].items)).toEqual(["h1", "h2"]);
+    expect(groupByPriority([])).toEqual([]);
+  });
+
+  it("counts jobs in plain words", () => {
+    expect(describeCount(1, 1)).toBe("1 job");
+    expect(describeCount(12, 12)).toBe("12 jobs");
+    expect(describeCount(3, 12)).toBe("3 of 12 jobs");
+    expect(describeCount(1, 12)).toBe("1 of 12 jobs");
+    expect(describeCount(0, 5)).toBe("0 of 5 jobs");
+  });
+
+  it("names the priorities", () => {
+    expect(priorityLabel(3)).toBe("High");
+    expect(priorityLabel(2)).toBe("Medium");
+    expect(priorityLabel(1)).toBe("Low");
+  });
+
+  it("offers the calendar picker the most pressing jobs first, narrowed by what was typed, capped on request", () => {
+    const items = [
+      job({ title: "Paint fence", priority: 1 }),
+      job({ title: "Fix tap", priority: 3 }),
+      job({ title: "Paint door", priority: 2 }),
+      job({ title: "Mow lawn", priority: 3 }),
+    ];
+    expect(titles(backlogForPicker(items, ""))).toEqual(["Fix tap", "Mow lawn", "Paint door", "Paint fence"]);
+    expect(titles(backlogForPicker(items, "paint"))).toEqual(["Paint door", "Paint fence"]);
+    expect(titles(backlogForPicker(items, "", 2))).toEqual(["Fix tap", "Mow lawn"]);
+    expect(backlogForPicker([], "x")).toEqual([]);
   });
 });

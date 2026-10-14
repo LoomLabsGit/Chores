@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
+import { backlogForPicker } from "@/lib/logic/backlog";
 import { formatLongDay } from "@/lib/logic/dates";
 import {
   allChoresAlphabetical,
@@ -13,9 +14,10 @@ import {
   titleTaken,
 } from "@/lib/logic/library";
 import { describeRepeat, REPEAT_OPTIONS, type RepeatChoice } from "@/lib/logic/recurrence";
-import { DEFAULT_BOUNTY, ESTIMATE_STEPS, libraryPoints, snapMinutes } from "@/lib/logic/points";
+import { DEFAULT_BOUNTY, ESTIMATE_STEPS, estimatePoints, libraryPoints, snapMinutes } from "@/lib/logic/points";
 import { useHousehold } from "@/lib/store/household-store";
-import type { ChoreLibraryItem, PricingType } from "@/lib/types";
+import type { BacklogItem, ChoreLibraryItem, PricingType } from "@/lib/types";
+import { PriorityDot } from "../backlog/priority";
 import { Icon } from "../icons";
 import { useToast } from "../toast";
 import { CategoryChips } from "../ui/category-chips";
@@ -25,9 +27,10 @@ import { AssigneeField, PricingFields } from "../ui/points-controls";
 import { Modal } from "../ui/modal";
 
 /** What the user picked in step 1, waiting for "when / who / repeat" in step 2. */
-type Draft =
+export type Draft =
   | { kind: "library"; chore: ChoreLibraryItem }
-  | { kind: "new"; title: string; oneOff: boolean };
+  | { kind: "new"; title: string; oneOff: boolean }
+  | { kind: "backlog"; item: BacklogItem };
 
 /** Whether a chore typed in is kept in the chore list to reuse ("repeat") or is for the calendar only ("one_off"). */
 type Mode = "one_off" | "repeat";
@@ -93,6 +96,7 @@ function Sheet({ date, onClose, onAdded }: Omit<Props, "open">) {
       ) : (
         <Library
           onPick={(chore) => setDraft({ kind: "library", chore })}
+          onPickJob={(item) => setDraft({ kind: "backlog", item })}
           oneOff={oneOff}
           onCreate={(title) => {
             setTyped(title);
@@ -124,6 +128,26 @@ function Pill({ chore, onPick }: { chore: ChoreLibraryItem; onPick: (c: ChoreLib
   );
 }
 
+/** A backlog job as a pill: its priority dot, its name and what it is worth. Picking it plans it onto the calendar. */
+function JobPill({ job, onPick }: { job: BacklogItem; onPick: (j: BacklogItem) => void }) {
+  return (
+    <button
+      onClick={() => onPick(job)}
+      className="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-full border border-line bg-surface px-4 py-1 text-[15px] font-bold shadow-card"
+    >
+      <PriorityDot priority={job.priority} />
+      {job.title}
+      <span className="flex items-center gap-0.5 text-xs font-extrabold text-gold">
+        <Icon name="bolt" size={11} />
+        {estimatePoints(job)}
+      </span>
+    </button>
+  );
+}
+
+/** Jobs offered at the top of step 1 before "Show all" is tapped. */
+const JOBS_SHOWN = 6;
+
 /**
  * Step 1: choose from the library, with the same search and quick category filters as the Manage tab.
  * Filtering swaps the Recent / Common / All sections for one list of matches. (A new chore can also be
@@ -131,6 +155,7 @@ function Pill({ chore, onPick }: { chore: ChoreLibraryItem; onPick: (c: ChoreLib
  */
 function Library({
   onPick,
+  onPickJob,
   onCreate,
   oneOff,
   onManage,
@@ -140,6 +165,7 @@ function Library({
   onCategory,
 }: {
   onPick: (c: ChoreLibraryItem) => void;
+  onPickJob: (j: BacklogItem) => void;
   onCreate: (title: string) => void;
   /** The mode chosen above the text box, so the "Create ..." shortcut follows it. */
   oneOff: boolean;
@@ -150,14 +176,19 @@ function Library({
   onCategory: (c: string | null) => void;
 }) {
   const { state } = useHousehold();
+  const [showAllJobs, setShowAllJobs] = useState(false);
 
   const categories = libraryCategories(state.library);
   // A filter must not outlive the last chore in its category.
   const activeCategory = category && categories.some((c) => c.toLowerCase() === category.toLowerCase()) ? category : null;
   const searching = query.trim() !== "" || activeCategory !== null;
   const results = searching ? filterLibrary(state.library, query, activeCategory) : [];
+  // Backlog jobs have no category, so a category filter rules them all out.
+  const jobMatches = searching && !activeCategory ? backlogForPicker(state.backlog, query) : [];
+  const matchCount = results.length + jobMatches.length;
   // Offered only when nothing matches: with matches on screen, picking one is what you are after.
-  const canCreate = results.length === 0 && query.trim() !== "" && !titleTaken(state.library, query);
+  const canCreate = matchCount === 0 && query.trim() !== "" && !titleTaken(state.library, query);
+  const jobs = backlogForPicker(state.backlog, "");
 
   const recent = recentChores(state.library);
   const common = commonChores(state.library);
@@ -171,8 +202,8 @@ function Library({
           type="search"
           value={query}
           onChange={(e) => onQuery(e.target.value)}
-          placeholder="Search chores"
-          aria-label="Search chores"
+          placeholder={state.backlog.length > 0 ? "Search chores and the backlog" : "Search chores"}
+          aria-label={state.backlog.length > 0 ? "Search chores and the backlog" : "Search chores"}
           enterKeyHint="search"
           className={fieldClass}
         />
@@ -182,13 +213,26 @@ function Library({
       {searching ? (
         <section aria-label="Search results" aria-live="polite" className="flex flex-col gap-3">
           <h3 className="text-xs font-extrabold uppercase tracking-wide text-muted">
-            {results.length} {results.length === 1 ? "match" : "matches"}
+            {matchCount} {matchCount === 1 ? "match" : "matches"}
           </h3>
+          {jobMatches.length > 0 && (
+            <div className="flex flex-col gap-2">
+              {results.length > 0 && <p className="text-sm font-bold text-muted">From the backlog</p>}
+              <div className="flex flex-wrap gap-2">
+                {jobMatches.map((j) => (
+                  <JobPill key={j.id} job={j} onPick={onPickJob} />
+                ))}
+              </div>
+            </div>
+          )}
           {results.length > 0 && (
-            <div className="flex flex-wrap gap-2">
-              {results.map((c) => (
-                <Pill key={c.id} chore={c} onPick={onPick} />
-              ))}
+            <div className="flex flex-col gap-2">
+              {jobMatches.length > 0 && <p className="text-sm font-bold text-muted">Chores</p>}
+              <div className="flex flex-wrap gap-2">
+                {results.map((c) => (
+                  <Pill key={c.id} chore={c} onPick={onPick} />
+                ))}
+              </div>
             </div>
           )}
           {canCreate && (
@@ -202,7 +246,7 @@ function Library({
               </span>
             </button>
           )}
-          {results.length === 0 && !canCreate && (
+          {matchCount === 0 && !canCreate && (
             <p className="rounded-2xl bg-raised px-4 py-6 text-center text-sm text-muted">
               Nothing matches. Try a different search or category.
             </p>
@@ -211,6 +255,29 @@ function Library({
       ) : (
         <>
           <p className="text-sm font-semibold text-muted">Pick a chore, or type a new one below.</p>
+
+          {jobs.length > 0 && (
+            <section aria-labelledby="backlog-h">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <h3 id="backlog-h" className="text-xs font-extrabold uppercase tracking-wide text-muted">
+                  From the backlog
+                </h3>
+                {jobs.length > JOBS_SHOWN && (
+                  <button
+                    onClick={() => setShowAllJobs((v) => !v)}
+                    className="min-h-11 rounded-full px-3 text-sm font-bold text-brand hover:bg-brand-soft"
+                  >
+                    {showAllJobs ? "Show fewer" : `Show all ${jobs.length}`}
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {(showAllJobs ? jobs : jobs.slice(0, JOBS_SHOWN)).map((j) => (
+                  <JobPill key={j.id} job={j} onPick={onPickJob} />
+                ))}
+              </div>
+            </section>
+          )}
 
           {recent.length > 0 && (
             <section aria-labelledby="recent-h">
@@ -333,7 +400,7 @@ function NewChoreInput({
 }
 
 /** Step 2: how long, how nasty, which day, who does it, and whether it repeats. Nothing is added until "Add". */
-function WhenWhoRepeat({
+export function WhenWhoRepeat({
   draft,
   date,
   onClose,
@@ -348,18 +415,27 @@ function WhenWhoRepeat({
   const { toast } = useToast();
   const categories = libraryCategories(state.library);
   const [day, setDay] = useState(date);
-  const [assignee, setAssignee] = useState<string | null>(me.id);
+  // A backlog job already knows who it is for; anything else starts as yours.
+  const [assignee, setAssignee] = useState<string | null>(draft.kind === "backlog" ? draft.item.assigned_to ?? me.id : me.id);
   const [repeat, setRepeat] = useState<RepeatChoice>("none");
-  const [minutes, setMinutes] = useState(draft.kind === "library" ? snapMinutes(draft.chore.default_duration) : 15);
-  const [tax, setTax] = useState(draft.kind === "library" ? draft.chore.chore_tax : 0);
-  // A library chore brings its own pricing model; a new one starts time-based.
-  const [pricing, setPricing] = useState<PricingType>(draft.kind === "library" ? draft.chore.pricing_type : "time_based");
-  const [bounty, setBounty] = useState(draft.kind === "library" ? draft.chore.fixed_bounty_points : DEFAULT_BOUNTY);
+  // A library chore or backlog job brings its own time and pricing; a new one starts at 15 minutes, time-based.
+  const known = draft.kind === "library" ? draft.chore : draft.kind === "backlog" ? draft.item : null;
+  const [minutes, setMinutes] = useState(
+    draft.kind === "library"
+      ? snapMinutes(draft.chore.default_duration)
+      : draft.kind === "backlog"
+        ? snapMinutes(draft.item.estimated_duration)
+        : 15,
+  );
+  const [tax, setTax] = useState(known ? known.chore_tax : 0);
+  const [pricing, setPricing] = useState<PricingType>(known ? known.pricing_type : "time_based");
+  const [bounty, setBounty] = useState(known ? known.fixed_bounty_points : DEFAULT_BOUNTY);
   // Only a brand-new chore needs a category; one from the library already has its own.
   const [category, setCategory] = useState("");
 
-  const name = draft.kind === "library" ? draft.chore.title : draft.title;
-  const oneOff = draft.kind === "new" && draft.oneOff;
+  const name = draft.kind === "library" ? draft.chore.title : draft.kind === "backlog" ? draft.item.title : draft.title;
+  // A one-off (typed, or planned from the backlog) is a single job: no category and nothing to repeat.
+  const oneOff = (draft.kind === "new" && draft.oneOff) || draft.kind === "backlog";
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -368,16 +444,18 @@ function WhenWhoRepeat({
     onClose();
     onAdded(day); // jump the calendar to that week straight away; the chore appears optimistically
     const run =
-      draft.kind === "library"
-        ? actions.scheduleChore(draft.chore, day, assignee, { repeat, minutes, tax, pricing, bounty })
-        : draft.oneOff
-          ? actions.scheduleOneOff({ title: draft.title, minutes, tax, pricing, bounty }, day, assignee)
-          : actions.createAndScheduleChore(
-              { title: draft.title, minutes, tax, pricing, bounty, category: resolveCategory(categories, category) },
-              day,
-              assignee,
-              repeat,
-            );
+      draft.kind === "backlog"
+        ? actions.scheduleBacklogItem(draft.item, day, assignee, { minutes, tax, pricing, bounty })
+        : draft.kind === "library"
+          ? actions.scheduleChore(draft.chore, day, assignee, { repeat, minutes, tax, pricing, bounty })
+          : draft.oneOff
+            ? actions.scheduleOneOff({ title: draft.title, minutes, tax, pricing, bounty }, day, assignee)
+            : actions.createAndScheduleChore(
+                { title: draft.title, minutes, tax, pricing, bounty, category: resolveCategory(categories, category) },
+                day,
+                assignee,
+                repeat,
+              );
     void run.then(
       (ok) =>
         ok &&
@@ -392,7 +470,11 @@ function WhenWhoRepeat({
     <form onSubmit={submit} className="flex flex-col gap-5">
       <div className="rounded-2xl bg-raised p-4">
         <p className="text-lg font-extrabold leading-snug">{name}</p>
-        {oneOff && <p className="mt-1 text-xs font-bold uppercase tracking-wide text-muted">One off</p>}
+        {oneOff && (
+          <p className="mt-1 text-xs font-bold uppercase tracking-wide text-muted">
+            {draft.kind === "backlog" ? "From the backlog" : "One off"}
+          </p>
+        )}
       </div>
 
       {draft.kind === "new" && !oneOff && (

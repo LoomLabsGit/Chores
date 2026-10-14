@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { useHousehold } from "@/lib/store/household-store";
 import { useToast } from "../toast";
@@ -94,6 +95,16 @@ export function ProfileMenu() {
               <p className="mt-2 text-xs text-muted">They choose &ldquo;Join partner&rdquo; after creating an account.</p>
             </div>
           )}
+
+          <Link
+            href="/manage"
+            role="menuitem"
+            onClick={() => setOpen(false)}
+            className="flex min-h-12 w-full items-center gap-3 border-t border-line px-5 text-sm font-bold hover:bg-raised"
+          >
+            <Icon name="sliders" size={18} className="text-muted" />
+            Manage chores
+          </Link>
 
           <button
             role="menuitem"

@@ -23,6 +23,7 @@ const TYPE_ICON: Record<NotificationType, IconName> = {
   reward_proposed: "gift",
   reward_approved: "gift",
   reward_declined: "gift",
+  backlog_assigned: "list",
 };
 
 export function NotificationsDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {

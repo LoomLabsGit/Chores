@@ -60,6 +60,26 @@ export type ChoreInstance = {
   fixed_bounty_points: number;
 };
 
+/** How pressing a backlog job is: 1 low, 2 medium, 3 high. Bigger sorts first. */
+export type BacklogPriority = 1 | 2 | 3;
+
+/** A job that needs doing, waiting in the shared backlog until someone plans it onto the calendar. */
+export type BacklogItem = {
+  id: string;
+  household_id: string;
+  title: string;
+  priority: BacklogPriority;
+  /** null = nobody in particular. */
+  assigned_to: string | null;
+  /** Estimated minutes (multiple of 5) and the chore tax / pricing it will carry onto the calendar. */
+  estimated_duration: number;
+  chore_tax: number;
+  pricing_type: PricingType;
+  fixed_bounty_points: number;
+  created_by: string | null;
+  created_at: string;
+};
+
 export type ChoreCompletion = {
   id: string;
   instance_id: string | null;
@@ -150,7 +170,8 @@ export type NotificationType =
   | "challenge_expired"
   | "reward_proposed"
   | "reward_approved"
-  | "reward_declined";
+  | "reward_declined"
+  | "backlog_assigned";
 
 export type AppNotification = {
   id: string;

@@ -22,6 +22,8 @@ import type { RepeatChoice } from "@/lib/logic/recurrence";
 import { uuid } from "@/lib/uuid";
 import type {
   AppNotification,
+  BacklogItem,
+  BacklogPriority,
   Challenge,
   ChallengeType,
   ChoreCompletion,
@@ -44,6 +46,8 @@ export type State = {
   household: Household | null;
   members: Profile[];
   library: ChoreLibraryItem[];
+  /** Jobs waiting in the shared backlog (unsorted: see lib/logic/backlog.ts). */
+  backlog: BacklogItem[];
   instances: Record<string, ChoreInstance>;
   /** Keyed by instance id. */
   completions: Record<string, ChoreCompletion>;
@@ -58,6 +62,7 @@ const initialState: State = {
   household: null,
   members: [],
   library: [],
+  backlog: [],
   instances: {},
   completions: {},
   challenges: [],
@@ -70,6 +75,7 @@ const initialState: State = {
 type ListRows = {
   members: Profile;
   library: ChoreLibraryItem;
+  backlog: BacklogItem;
   challenges: Challenge;
   rewards: Reward;
   redemptions: RewardRedemption;
@@ -165,6 +171,18 @@ export type NewChore = {
   bounty?: number;
 };
 
+/** A backlog job as typed into the add / edit sheet. */
+export type BacklogInput = {
+  title: string;
+  priority: BacklogPriority;
+  /** null = nobody in particular. */
+  assignedTo: string | null;
+  minutes: number;
+  tax: number;
+  pricing: PricingType;
+  bounty: number;
+};
+
 /** A library chore as edited on the Manage screen. */
 export type LibraryInput = {
   title: string;
@@ -256,6 +274,21 @@ export type Actions = {
    * offered again under Recent / Common / All tasks or on the Manage tab) and it does not repeat.
    */
   scheduleOneOff: (chore: NewChore, date: string, assignedTo: string | null) => Promise<boolean>;
+  /** Backlog: log a job that needs doing. Resolves to the job as saved, or null if it failed. */
+  addBacklogItem: (input: BacklogInput) => Promise<BacklogItem | null>;
+  updateBacklogItem: (id: string, input: BacklogInput) => Promise<boolean>;
+  removeBacklogItem: (id: string) => Promise<boolean>;
+  /**
+   * Plan a backlog job onto the calendar: it becomes an ordinary one-off chore on `date` and leaves the backlog.
+   * `assignedTo` is who it is for (null = nobody in particular); the other options override what the job was
+   * logged with, for this planning only.
+   */
+  scheduleBacklogItem: (
+    item: BacklogItem,
+    date: string,
+    assignedTo: string | null,
+    opts?: Partial<Pick<BacklogInput, "minutes" | "tax" | "pricing" | "bounty">>,
+  ) => Promise<boolean>;
   /** Manage chores: add a chore to the library without putting it on the calendar. */
   createLibraryChore: (input: LibraryInput) => Promise<boolean>;
   /**
@@ -346,7 +379,15 @@ async function fetchAll<T>(
   }
 }
 
-type TableKey = "profiles" | "chore_library" | "chore_instances" | "challenges" | "rewards" | "reward_redemptions" | "notifications";
+type TableKey =
+  | "profiles"
+  | "chore_library"
+  | "backlog_items"
+  | "chore_instances"
+  | "challenges"
+  | "rewards"
+  | "reward_redemptions"
+  | "notifications";
 
 // ---------------------------------------------------------------------------
 // Provider
@@ -403,16 +444,17 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
 
   const loadCore = useCallback(async () => {
     try {
-      const [profiles, household, library, challenges, rewards, redemptions, notifications] = await Promise.all([
+      const [profiles, household, library, backlog, challenges, rewards, redemptions, notifications] = await Promise.all([
         supabase.from("profiles").select("*").order("created_at"),
         supabase.from("households").select("*").single(),
         supabase.from("chore_library").select("*"),
+        supabase.from("backlog_items").select("*"),
         supabase.from("challenges").select("*").order("created_at", { ascending: false }),
         supabase.from("rewards").select("*").order("cost"),
         supabase.from("reward_redemptions").select("*").order("created_at", { ascending: false }).limit(200),
         supabase.from("notifications").select("*").order("created_at", { ascending: false }).limit(50),
       ]);
-      const firstError = [profiles, household, library, challenges, rewards, redemptions, notifications].find((r) => r.error);
+      const firstError = [profiles, household, library, backlog, challenges, rewards, redemptions, notifications].find((r) => r.error);
       if (firstError?.error) throw new Error(firstError.error.message);
       dispatch({
         type: "loaded",
@@ -420,6 +462,7 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           household: household.data as Household,
           members: (profiles.data ?? []) as Profile[],
           library: (library.data ?? []) as ChoreLibraryItem[],
+          backlog: (backlog.data ?? []) as BacklogItem[],
           challenges: (challenges.data ?? []) as Challenge[],
           rewards: (rewards.data ?? []) as Reward[],
           redemptions: (redemptions.data ?? []) as RewardRedemption[],
@@ -469,6 +512,7 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
     const keyFor: Record<TableKey, ListKey | "instances"> = {
       profiles: "members",
       chore_library: "library",
+      backlog_items: "backlog",
       chore_instances: "instances",
       challenges: "challenges",
       rewards: "rewards",
@@ -744,6 +788,114 @@ export function HouseholdProvider({ userId, children }: { userId: string; childr
           return fail(error);
         }
         return api.scheduleChore(lib, date, assignedTo, opts);
+      },
+
+      async addBacklogItem(input) {
+        const id = uuid();
+        const row: BacklogItem = {
+          id,
+          household_id: householdIdNow(),
+          title: input.title.trim(),
+          priority: input.priority,
+          assigned_to: input.assignedTo,
+          estimated_duration: input.minutes,
+          chore_tax: input.pricing === "fixed_bounty" ? 0 : input.tax,
+          pricing_type: input.pricing,
+          fixed_bounty_points: input.bounty,
+          created_by: userId,
+          created_at: new Date().toISOString(),
+        };
+        dispatch({ type: "upsert", key: "backlog", row });
+        const { data, error } = await supabase
+          .from("backlog_items")
+          .insert({
+            id,
+            household_id: row.household_id,
+            title: row.title,
+            priority: row.priority,
+            assigned_to: row.assigned_to,
+            estimated_duration: row.estimated_duration,
+            chore_tax: row.chore_tax,
+            pricing_type: row.pricing_type,
+            fixed_bounty_points: row.fixed_bounty_points,
+          })
+          .select()
+          .single();
+        if (error) {
+          dispatch({ type: "remove", key: "backlog", id });
+          fail(error);
+          return null;
+        }
+        dispatch({ type: "upsert", key: "backlog", row: data as BacklogItem });
+        return data as BacklogItem;
+      },
+
+      async updateBacklogItem(id, input) {
+        const prev = stateRef.current.backlog.find((b) => b.id === id);
+        if (!prev) return false;
+        const next: BacklogItem = {
+          ...prev,
+          title: input.title.trim(),
+          priority: input.priority,
+          assigned_to: input.assignedTo,
+          estimated_duration: input.minutes,
+          chore_tax: input.pricing === "fixed_bounty" ? 0 : input.tax,
+          pricing_type: input.pricing,
+          fixed_bounty_points: input.bounty,
+        };
+        dispatch({ type: "upsert", key: "backlog", row: next });
+        const { data, error } = await supabase
+          .from("backlog_items")
+          .update({
+            title: next.title,
+            priority: next.priority,
+            assigned_to: next.assigned_to,
+            estimated_duration: next.estimated_duration,
+            chore_tax: next.chore_tax,
+            pricing_type: next.pricing_type,
+            fixed_bounty_points: next.fixed_bounty_points,
+          })
+          .eq("id", id)
+          .select("id");
+        if (error || !data?.length) {
+          // Someone planned or removed it in the meantime: show the truth rather than our guess.
+          dispatch({ type: "upsert", key: "backlog", row: prev });
+          resync();
+          return fail(error ?? { message: "That job is no longer in the backlog." });
+        }
+        return true;
+      },
+
+      async removeBacklogItem(id) {
+        const prev = stateRef.current.backlog.find((b) => b.id === id);
+        if (!prev) return false;
+        dispatch({ type: "remove", key: "backlog", id });
+        const { error } = await supabase.from("backlog_items").delete().eq("id", id);
+        if (error) {
+          dispatch({ type: "upsert", key: "backlog", row: prev });
+          return fail(error);
+        }
+        return true;
+      },
+
+      async scheduleBacklogItem(item, date, assignedTo, opts = {}) {
+        const { data, error } = await supabase.rpc("schedule_backlog_item", {
+          p_item_id: item.id,
+          p_date: date,
+          p_assigned_to: assignedTo,
+          p_minutes: opts.minutes ?? null,
+          p_tax: opts.tax ?? null,
+          p_pricing_type: opts.pricing ?? null,
+          p_bounty: opts.bounty ?? null,
+        });
+        if (error) {
+          // Most likely the other person planned it first: re-read so the list shows what is really there.
+          resync();
+          return fail(error);
+        }
+        dispatch({ type: "remove", key: "backlog", id: item.id });
+        dispatch({ type: "instance", row: data as ChoreInstance });
+        return true;
       },
 
       async createLibraryChore(input) {

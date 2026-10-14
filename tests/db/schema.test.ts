@@ -69,6 +69,7 @@ beforeAll(async () => {
   await db.exec(read("supabase/migrations/0013_forfeit_and_joint_challenges.sql"));
   await db.exec(read("supabase/migrations/0014_everyone_is_equal.sql"));
   await db.exec(read("supabase/migrations/0015_reward_signoff.sql"));
+  await db.exec(read("supabase/migrations/0016_backlog.sql"));
   for (const id of [ALEX, BLAKE, CASEY, DREW]) {
     await admin(`insert into auth.users (id, email) values ($1, $2)`, [id, `${id}@example.com`]);
   }
@@ -2398,5 +2399,215 @@ describe.each([
     await as(me, `select * from public.update_library_chore($1, $2, 'Outdoors', 20, 9)`, [lib.id, `${name} renamed`]);
     const [row] = await admin(`select title, estimated_duration as minutes, chore_tax as tax from public.chore_instances where id = $1`, [id]);
     expect(row).toEqual({ title: name, minutes: 45, tax: 3 });
+  });
+});
+
+describe.each([
+  ["the creator", ALEX, BLAKE],
+  ["the partner", BLAKE, ALEX],
+])("the backlog, used by %s", (_who, me, other) => {
+  /** A backlog job added the way the app adds one (a direct insert). */
+  async function job(
+    user: string,
+    title: string,
+    over: Partial<{ priority: number; assigned_to: string | null; minutes: number; tax: number; pricing: string; bounty: number }> = {},
+  ) {
+    const [row] = await as(
+      user,
+      `insert into public.backlog_items (household_id, title, priority, assigned_to, estimated_duration, chore_tax, pricing_type, fixed_bounty_points)
+       values (public.current_household_id(), $1, $2, $3, $4, $5, $6, $7) returning *`,
+      [title, over.priority ?? 2, over.assigned_to ?? null, over.minutes ?? 15, over.tax ?? 0, over.pricing ?? "time_based", over.bounty ?? 15],
+    );
+    return row;
+  }
+  const libraryCount = async () =>
+    Number((await admin(`select count(*)::int as n from public.chore_library where household_id = (select household_id from public.profiles where id = $1)`, [me]))[0].n);
+  const heard = (recipient: string, itemId: string) =>
+    admin(`select message from public.notifications where recipient_id = $1 and type = 'backlog_assigned' and reference_id = $2 order by created_at`, [recipient, itemId]);
+  const plan = (user: string, id: string, date: string, who: string | null, ...rest: unknown[]) =>
+    as(user, `select i.*, i.scheduled_date::text as day from public.schedule_backlog_item($1, $2, $3${rest.map((_, i) => `, $${i + 4}`).join("")}) i`, [id, date, who, ...rest]);
+
+  it("a job is shared: both partners see it, nobody outside the household does, and who added it is recorded", async () => {
+    const j = await job(me, "  Clear the gutters  ", { priority: 3 });
+    expect(j).toMatchObject({ title: "Clear the gutters", priority: 3, created_by: me, assigned_to: null, pricing_type: "time_based" });
+    expect(await as(other, `select 1 from public.backlog_items where id = $1`, [j.id])).toHaveLength(1);
+    expect(await as(DREW, `select 1 from public.backlog_items where id = $1`, [j.id])).toHaveLength(0);
+  });
+
+  it("refuses bad values at the database, whatever the app sends", async () => {
+    await expect(job(me, "   ")).rejects.toThrow();
+    await expect(job(me, "x".repeat(61))).rejects.toThrow();
+    await expect(job(me, "Bad priority", { priority: 0 })).rejects.toThrow();
+    await expect(job(me, "Bad priority", { priority: 4 })).rejects.toThrow();
+    await expect(job(me, "Bad time", { minutes: 7 })).rejects.toThrow();
+    await expect(job(me, "Bad time", { minutes: 0 })).rejects.toThrow();
+    await expect(job(me, "Bad tax", { tax: 51 })).rejects.toThrow();
+    await expect(job(me, "Bad bounty", { pricing: "fixed_bounty", bounty: 0 })).rejects.toThrow();
+    await expect(job(me, "Bad bounty", { pricing: "fixed_bounty", bounty: 501 })).rejects.toThrow();
+  });
+
+  it("clients cannot choose who added a job or put one in another household", async () => {
+    await expect(
+      as(me, `insert into public.backlog_items (household_id, title, created_by) values (public.current_household_id(), 'Forged', $1)`, [other]),
+    ).rejects.toThrow(/permission denied/);
+    const drewHousehold = (await admin(`select household_id from public.profiles where id = $1`, [DREW]))[0].household_id;
+    await expect(
+      as(me, `insert into public.backlog_items (household_id, title) values ($1, 'Smuggled')`, [drewHousehold]),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("can only be given to someone in your own household", async () => {
+    await expect(job(me, "To a stranger", { assigned_to: DREW })).rejects.toThrow(/row-level security/);
+    const j = await job(me, "Mine to give");
+    await expect(as(me, `update public.backlog_items set assigned_to = $2 where id = $1 returning id`, [j.id, DREW])).rejects.toThrow(/row-level security/);
+    await expect(as(me, `update public.backlog_items set assigned_to = $2 where id = $1 returning id`, [j.id, other])).resolves.toHaveLength(1);
+  });
+
+  it("either partner can edit or remove any job; the other household cannot touch it", async () => {
+    const j = await job(me, "Everyone can change this", { priority: 1 });
+    expect(await as(other, `update public.backlog_items set priority = 3, title = 'Changed by them' where id = $1 returning priority`, [j.id])).toEqual([{ priority: 3 }]);
+    expect(await as(DREW, `update public.backlog_items set priority = 1 where id = $1 returning id`, [j.id])).toHaveLength(0);
+    expect(await as(DREW, `delete from public.backlog_items where id = $1 returning id`, [j.id])).toHaveLength(0);
+    expect(await as(other, `delete from public.backlog_items where id = $1 returning id`, [j.id])).toHaveLength(1);
+    expect(await admin(`select 1 from public.backlog_items where id = $1`, [j.id])).toHaveLength(0);
+  });
+
+  it("clients cannot rewrite who added a job or move it to another household", async () => {
+    const j = await job(me, "Stays put");
+    await expect(as(me, `update public.backlog_items set created_by = $2 where id = $1`, [j.id, other])).rejects.toThrow(/permission denied/);
+    await expect(as(me, `update public.backlog_items set household_id = gen_random_uuid() where id = $1`, [j.id])).rejects.toThrow(/permission denied/);
+  });
+
+  it("giving a job to the other person tells them; giving it to yourself, or leaving it open, tells nobody", async () => {
+    const forThem = await job(me, "For them", { assigned_to: other });
+    const heardByThem = await heard(other, forThem.id);
+    expect(heardByThem).toHaveLength(1);
+    expect(heardByThem[0].message).toMatch(/gave you a backlog job: For them$/);
+    expect(await heard(me, forThem.id)).toHaveLength(0);
+
+    const forMe = await job(me, "For me", { assigned_to: me });
+    const open = await job(me, "For whoever");
+    expect(await heard(me, forMe.id)).toHaveLength(0);
+    expect(await heard(other, forMe.id)).toHaveLength(0);
+    expect(await heard(other, open.id)).toHaveLength(0);
+  });
+
+  it("reassigning tells the new person once; editing something else, or unassigning, does not", async () => {
+    const j = await job(me, "Passed around");
+    await as(me, `update public.backlog_items set assigned_to = $2 where id = $1`, [j.id, other]);
+    expect(await heard(other, j.id)).toHaveLength(1);
+    await as(me, `update public.backlog_items set priority = 3, title = 'Passed around, urgently' where id = $1`, [j.id]);
+    expect(await heard(other, j.id)).toHaveLength(1);
+    // The edit form sends every field, including the assignee it did not change.
+    await as(me, `update public.backlog_items set assigned_to = $2, priority = 1, title = 'Passed around, calmly' where id = $1`, [j.id, other]);
+    expect(await heard(other, j.id)).toHaveLength(1);
+    await as(me, `update public.backlog_items set assigned_to = null where id = $1`, [j.id]);
+    expect(await heard(other, j.id)).toHaveLength(1);
+    expect(await heard(me, j.id)).toHaveLength(0);
+  });
+
+  describe("planning a job (schedule_backlog_item)", () => {
+    it("puts it on the calendar as an ordinary one-off chore and takes it off the backlog, leaving the library alone", async () => {
+      const before = await libraryCount();
+      const j = await job(me, "Number the bins", { minutes: 30, tax: 10, assigned_to: me });
+      const [inst] = await plan(me, j.id, "2026-10-20", me);
+      expect(inst).toMatchObject({
+        title: "Number the bins", chore_id: null, assigned_to: me, day: "2026-10-20",
+        estimated_duration: 30, chore_tax: 10, pricing_type: "time_based", is_completed: false, is_recurring: false,
+      });
+      expect(await admin(`select 1 from public.backlog_items where id = $1`, [j.id])).toHaveLength(0);
+      expect(await libraryCount()).toBe(before);
+      // Both partners see the new chore.
+      expect(await as(other, `select title from public.chore_instances where id = $1`, [inst.id])).toEqual([{ title: "Number the bins" }]);
+    });
+
+    it("the person planning it chooses who it is for and may override the time and tax for this once", async () => {
+      const j = await job(me, "Repaint the shed", { minutes: 60, tax: 5, assigned_to: me });
+      const [inst] = await plan(me, j.id, "2026-10-21", other, 90, 20);
+      expect(inst).toMatchObject({ assigned_to: other, estimated_duration: 90, chore_tax: 20, pricing_type: "time_based" });
+    });
+
+    it("can leave the chore unassigned (the open pool) whatever the job said", async () => {
+      const j = await job(me, "Whoever fancies it", { assigned_to: other });
+      const [inst] = await plan(me, j.id, "2026-10-22", null);
+      expect(inst.assigned_to).toBeNull();
+    });
+
+    it("a fixed-bounty job arrives as a fixed bounty with no chore tax; the bounty can be overridden", async () => {
+      const j = await job(me, "Declutter the loft", { pricing: "fixed_bounty", bounty: 40, tax: 12 });
+      const [inst] = await plan(me, j.id, "2026-10-23", me);
+      expect(inst).toMatchObject({ pricing_type: "fixed_bounty", fixed_bounty_points: 40, chore_tax: 0 });
+      const k = await job(me, "Declutter the garage", { pricing: "fixed_bounty", bounty: 40 });
+      const [again] = await plan(me, k.id, "2026-10-23", me, null, null, "fixed_bounty", 55);
+      expect(again.fixed_bounty_points).toBe(55);
+    });
+
+    it("switching the pricing at planning time is honoured (and a bounty drops the tax)", async () => {
+      const j = await job(me, "Switch me", { minutes: 20, tax: 8 });
+      const [inst] = await plan(me, j.id, "2026-10-24", me, null, 9, "fixed_bounty", 25);
+      expect(inst).toMatchObject({ pricing_type: "fixed_bounty", fixed_bounty_points: 25, chore_tax: 0, estimated_duration: 20 });
+    });
+
+    it("a chore planned for the other person tells them, like any assignment", async () => {
+      const j = await job(me, "Hand it over");
+      const [inst] = await plan(me, j.id, "2026-10-25", other);
+      const notes = await admin(`select message from public.notifications where recipient_id = $1 and type = 'chore_assigned' and reference_id = $2`, [other, inst.id]);
+      expect(notes).toHaveLength(1);
+    });
+
+    it("pays the person it is for when it is done, exactly like any other chore", async () => {
+      const j = await job(me, "Wash the car", { minutes: 30, tax: 10 });
+      const [inst] = await plan(me, j.id, "2026-10-26", other);
+      const points = async (id: string) => Number((await admin(`select points from public.profiles where id = $1`, [id]))[0].points);
+      const [mine, theirs] = [await points(me), await points(other)];
+      await as(me, `select * from public.complete_chore($1, 30, 100)`, [inst.id]);
+      expect(await points(me)).toBe(mine);
+      expect(await points(other)).toBe(theirs + 6 + 10); // 30 minutes = 6 points, plus the 10 chore tax
+    });
+
+    it("only one chore is made when it is planned twice (a double tap, or both partners at once)", async () => {
+      const title = `Plan me once ${me.slice(-1)}`;
+      const j = await job(me, title);
+      await plan(me, j.id, "2026-10-27", me);
+      await expect(plan(other, j.id, "2026-10-27", other)).rejects.toThrow(/no longer in the backlog/);
+      await expect(plan(me, j.id, "2026-10-28", me)).rejects.toThrow(/no longer in the backlog/);
+      const made = await admin(`select 1 from public.chore_instances where title = $1`, [title]);
+      expect(made).toHaveLength(1);
+    });
+
+    it("refuses an outsider's job, a stranger as the assignee and a missing day, and changes nothing when it does", async () => {
+      const j = await job(me, "Guarded");
+      await expect(plan(DREW, j.id, "2026-10-29", DREW)).rejects.toThrow(/no longer in the backlog/);
+      await expect(plan(me, j.id, "2026-10-29", DREW)).rejects.toThrow(/someone in your household/);
+      await expect(as(me, `select * from public.schedule_backlog_item($1, null, $2)`, [j.id, me])).rejects.toThrow(/Pick a day/);
+      expect(await admin(`select 1 from public.backlog_items where id = $1`, [j.id])).toHaveLength(1);
+      expect(await admin(`select 1 from public.chore_instances where title = 'Guarded'`)).toHaveLength(0);
+    });
+
+    it("the same pricing limits apply to what it plans (a bad override fails and the job stays on the backlog)", async () => {
+      const j = await job(me, "Strict");
+      await expect(plan(me, j.id, "2026-10-30", me, 7)).rejects.toThrow();
+      await expect(plan(me, j.id, "2026-10-30", me, 15, 99)).rejects.toThrow();
+      expect(await admin(`select 1 from public.backlog_items where id = $1`, [j.id])).toHaveLength(1);
+    });
+  });
+});
+
+describe("the backlog: access from outside", () => {
+  it("signed-out visitors can neither read the backlog nor plan a job", async () => {
+    await expect(asAnon(`select * from public.backlog_items`)).rejects.toThrow(/permission denied/);
+    await expect(
+      asAnon(`select * from public.schedule_backlog_item(gen_random_uuid(), '2026-10-20', null)`),
+    ).rejects.toThrow(/permission denied/);
+  });
+
+  it("a signed-in user with no household has an empty backlog and cannot add to one", async () => {
+    expect(await as(CASEY, `select * from public.backlog_items`)).toHaveLength(0);
+    await expect(as(CASEY, `insert into public.backlog_items (household_id, title) values (gen_random_uuid(), 'Nope')`)).rejects.toThrow();
+  });
+
+  it("is published to realtime so both phones update live", async () => {
+    const rows = await admin(`select 1 from pg_publication_tables where pubname = 'supabase_realtime' and tablename = 'backlog_items'`);
+    expect(rows).toHaveLength(1);
   });
 });
